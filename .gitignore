@@ -1,0 +1,17 @@
+/*
+!Dockerfile
+!.gitignore
+!.dockerignore
+
+!scripts
+/scripts/train_nomad.sh
+
+!/src
+
+!/utils
+/utils/commit_repo.py
+
+!/visualnav-transformer
+# remove unnecessary images
+/visualnav-transformer/deployment/topomaps
+
