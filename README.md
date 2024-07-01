@@ -19,7 +19,7 @@ git clone git@github.com:robodhruv/visualnav-transformer.git git@github.com:Stan
 
 2. Install the dependencies related to the GitHub repos.
 ```
-pip install -e diffusion_poolicy/ visualnav-transformer/ stlcg/
+pip install -e diffusion_policy/ visualnav-transformer/ stlcg/
 ```
 
 3. Install the dependencies listed in the requirements.txt file. [TODO]
