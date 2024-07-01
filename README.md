@@ -28,4 +28,7 @@ pip install -r requirements.txt
 ```
 
 4. Install ROS dependencies, instructions listed [here](https://wiki.ros.org/noetic/Installation/Ubuntu).
-5. Run "/scripts/train_nomad.sh".
+5. Run:
+```
+python train.py -c ~/visualnav-transformer/train/config/nomad.yaml
+```
