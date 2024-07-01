@@ -63,16 +63,18 @@ RUN pip3 install --extra-index-url https://rospypi.github.io/simple/ sensor-msgs
 # copy as late as possible to optimize caching
 COPY /utils /temp
 # relative to app dir
-RUN python /temp/utils/delete_roscpp_loggers.py
+RUN python delete_roscpp_loggers.py
 
 RUN git clone https://github.com/real-stanford/diffusion_policy.git
 RUN pip3 install -e diffusion_policy 
 
-RUN pip install git+https://github.com/ChaoningZhang/MobileSAM.git ipython graphviz timm PyGithub
+RUN pip install git+https://github.com/ChaoningZhang/MobileSAM.git ipython graphviz timm PyGithub vit-pytorch
 
 # RUN mkdir -p /data/sacson/huron
 
 # change wrong dir in process_bags.py
 # RUN sed -i "s|vint_train/process_data|../temp/visualnav-transformer/train/vint_train/process_data|g" visualnav-transformer/train/process_bags.py
+
+RUN git config --global --add safe.directory /app 
 
 WORKDIR /app
