@@ -4,7 +4,7 @@
 This code modifies the repositories for [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/). 
 
 ## Setup
-It is recomemnded to build the docker image from the Dockerfile and run it. 
+It is recommended to build the docker image from the Dockerfile and run it. Ensure that the utils/delete_roscpp_loggers.py file is properly copied to avoid future ROS errors with the roscpp dependency.
 ```
 docker build -t [image_name] .
 ./scripts/train_nomad.sh
