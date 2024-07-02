@@ -64,7 +64,7 @@ def mask_to_img(masks: dict) -> np.ndarray:
         m = ann['segmentation']
         mask_img[m] = np.random.random(3)
    
-    mask_img = cv2.resize(mask_img, (256, 256))  # for ViT, it will be distorted
+    mask_img = cv2.resize(mask_img, (256, 256))  # TODO: for ViT, it will be distorted
     mask_img = np.resize(mask_img, (mask_img.shape[-1], mask_img.shape[0], mask_img.shape[1]))
 
     mask_img = torch.from_numpy(mask_img).unsqueeze(0)
@@ -101,6 +101,7 @@ def generate_waypoints(
 ) -> Tuple[stlcg.STL_Formula, torch.Tensor]:
     z_stacked = None
 
+    # load last latent file if not already saved
     latent_dir = "latents"
     latent_file = os.path.join(latent_dir, "last_saved_100x1000.pt")
 
@@ -142,12 +143,12 @@ def generate_waypoints(
 
     for z_t in z_stacked:
         cossim = 2 * torch.randn(1) - 1
-        phi_t = stlcg.Expression('phi_t', cossim)
+        phi_t = stlcg.Expression('phi_t', cossim) > 0
 
         if psi is None:
             psi = phi_t
         else:
-            psi = stlcg.Until(psi, phi_t)
+            psi = stlcg.Until(psi, phi_t)  # TODO: change to Until operator
 
     return psi, z_stacked
 
@@ -171,11 +172,13 @@ def compute_stl_loss(
         
         inputs = []
         for z_t in z_embeddings:
-            cossim = F.cosine_similarity(z_t, z, dim=1)
+            cossim = F.cosine_similarity(z_t, z, dim=1).float()
             inputs.append(cossim)
 
-        print("inputs==========", inputs)
+        inputs = torch.tensor(inputs)
 
+        print("inputs==========", inputs)
+        
         # STL loss
         if formula is None:
             raise ValueError(f"Formula is not properly defined: {self.formula}")
