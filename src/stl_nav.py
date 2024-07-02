@@ -70,7 +70,7 @@ def mask_to_img(masks: dict) -> np.ndarray:
     mask_img = torch.from_numpy(mask_img).unsqueeze(0)
     mask_img = mask_img.to(torch.float32)  # type incompatibility otherwise
 
-    print("mask img shape ===", mask_img.shape)
+    #print("mask img shape ===", mask_img.shape)
 
     return mask_img  # Mobile-ViT only takes scalar doubles
 
@@ -101,36 +101,42 @@ def generate_waypoints(
 ) -> Tuple[stlcg.STL_Formula, torch.Tensor]:
     z_stacked = None
 
-    for i, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
-        obs_img, goal_img, _, _, _, _, _ = data
+    latent_dir = "latents"
+    latent_file = os.path.join(latent_dir, "last_saved_100x1000.pt")
 
-        obs_imgs = torch.split(obs_img, 3, dim=1)
-        viz_obs_img = TF.resize(obs_imgs[-1], VISUALIZATION_IMAGE_SIZE[::-1])
-        # TODO: implement goal images
-        # viz_goal_img = TF.resize(goal_img, VISUALIZATION_IMAGE_SIZE[::-1])
+    if not os.path.isdir(latent_dir):
+        for i, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
+            obs_img, goal_img, _, _, _, _, _ = data
 
-        for obs in viz_obs_img:
-            z_t = generate_embeddings_from_obs(
-                    obs,
-                    mb_sam,
-                    mb_vit
-            )
-            
-            if z_stacked is None:
-                z_stacked = z_t
-            else:    
-                print("\nBEFORE")
-                print(z_stacked.shape)
-                print(z_t.shape)
-                z_stacked = torch.cat((z_stacked, z_t), dim=0)
-                print("AFTER\n", z_stacked.shape)
+            obs_imgs = torch.split(obs_img, 3, dim=1)
+            viz_obs_img = TF.resize(obs_imgs[-1], VISUALIZATION_IMAGE_SIZE[::-1])
+            # TODO: implement goal images
+            # viz_goal_img = TF.resize(goal_img, VISUALIZATION_IMAGE_SIZE[::-1])
 
-            # TODO: this is temporary
-            if z_stacked.shape[0] == 100:
-                break
-        break  # TODO: temp
+            for obs in viz_obs_img:
+                z_t = generate_embeddings_from_obs(
+                        obs,
+                        mb_sam,
+                        mb_vit
+                )
+                
+                if z_stacked is None:
+                    z_stacked = z_t
+                else:    
+                    print("\nBEFORE")
+                    print(z_stacked.shape)
+                    print(z_t.shape)
+                    z_stacked = torch.cat((z_stacked, z_t), dim=0)
+                    print("AFTER\n", z_stacked.shape)
 
-    torch.save(z_stacked, f"latents/last_saved_{z_stacked.shape[0]}x{z_stacked.shape[1]}.pt")
+                # TODO: this is temporary
+                if z_stacked.shape[0] == 100:
+                    break
+            break  # TODO: temp
+
+        torch.save(z_stacked, latent_file)
+    else:
+        z_stacked = torch.load(latent_file)
 
     psi = None
 
@@ -157,15 +163,6 @@ def compute_stl_loss(
     stl_loss = 0
     margin = 0.05
 
-  #   psi = None
-  #   for z_t in z_stacked:
-  #       phi_t = stlcg.Expression('phi_t', )
-
-  #       if psi is None:
-  #           psi = phi_t
-  #       else:
-  #           psi = stlcg.Until(psi, phi_t)
-
     for i, obs in enumerate(viz_obs):
         z = generate_embeddings_from_obs(
                 obs,
@@ -177,6 +174,8 @@ def compute_stl_loss(
         for z_t in z_embeddings:
             cossim = F.cosine_similarity(z_t, z, dim=1)
             inputs.append(cossim)
+
+        print("inputs==========", inputs)
 
         # STL loss
         if formula is None:
