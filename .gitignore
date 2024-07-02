@@ -14,5 +14,3 @@
 !/visualnav-transformer
 # remove unnecessary images
 /visualnav-transformer/deployment/topomaps
-
-!formula.pdf
