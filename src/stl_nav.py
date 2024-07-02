@@ -140,9 +140,8 @@ def generate_waypoints(
 
     psi = None
 
-    cossim = torch.Tensor([0])
-
     for z_t in z_stacked:
+        cossim = 2 * torch.randn(1) - 1
         phi_t = stlcg.Expression('phi_t', cossim)
 
         if psi is None:
