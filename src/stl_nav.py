@@ -10,9 +10,14 @@ import matplotlib.pyplot as plt
 import os
 import tqdm
 import cv2
+import warnings
+
+# be cautious of when real warnings appear
+warnings.filterwarnings("ignore")
 
 from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator
 from vit_pytorch.mobile_vit import MobileViT
+
 sys.path.insert(0, 'visualnav-transformer/train')
 from vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
 from vint_train.visualizing.visualize_utils import to_numpy, from_numpy
@@ -122,7 +127,7 @@ def generate_waypoints(
     dataset: DataLoader, 
     mb_sam: SamAutomaticMaskGenerator,
     mb_vit: MobileViT,
-    visualize_waypoint: bool = False,
+    visualize_waypoint: bool=False,
 ) -> torch.Tensor:
     """
     Generates latent waypoints from the full, unshuffled dataset.
@@ -151,19 +156,21 @@ def generate_waypoints(
             # reshape to MobileViT-compatible shape
             viz_obs_imgs = TF.resize(obs_imgs[-1], [256, 256])
 
-            # visualize one of the visualization images (optional)
+            # save one of the visualization images (optional)
             if visualize_waypoint:
+                save_path = "observation.png"
+
                 viz_obs_img = np.moveaxis(to_numpy(viz_obs_imgs[0]), 0, -1)
                 plt.imshow(viz_obs_img)
-                save_path = "observation.png"
                 plt.savefig(save_path)
+
                 wandb.log({"ex": [wandb.Image(save_path)]}, commit=False)
 
             # TODO: implement goal images
             # viz_goal_img = TF.resize(goal_img, VISUALIZATION_IMAGE_SIZE[::-1])
 
             # convert the resized batch into latent vectors
-            z_t = generate_latents_from_obs(
+            z_w = generate_latents_from_obs(
                     viz_obs_imgs,
                     mb_sam,
                     mb_vit
@@ -173,9 +180,9 @@ def generate_waypoints(
 
             # recursively concatenate latent vectors
             if z_stacked is None:
-                z_stacked = z_t
+                z_stacked = z_w
             else:
-                z_stacked = torch.cat((z_stacked, z_t), dim=0)
+                z_stacked = torch.cat((z_stacked, z_w), dim=0)
 
             # TODO: temporary stop point
             if z_stacked.shape[0] == 256:
@@ -218,14 +225,49 @@ def compute_stl_loss(
     # formula: stlcg.STL_Formula,
     mb_sam: SamAutomaticMaskGenerator,
     mb_vit: MobileViT,
-) -> torch.Tensor:
-    margin = 0.0
-
+    visualize_formula: bool=False,
+) -> torch.Tensor: 
+    """
+    Generates STL formula and inputs for robustness, while computing the STL
+    loss based on robustness.
+    """
+    inputs = []
     obs_latents = generate_latents_from_obs(viz_obs, mb_sam, mb_vit)
     
-    # generate STL formula and inputs for robustness
+    # for each waypoint, compute cos_sim for the observation batch
+    outer_form = None
+    # indicates the sensitivity of satisfaction for cosine distance
+    THRESHOLD = 0.2
 
+    """ Method 1:
+    O(nm) time
+    """
 
+    # print(waypoint_latents.shape, obs_latents.shape)
+
+    # ensure that all latent observations are close to at least one waypoint latent
+    # for i in range(waypoint_latents.shape[0]):
+    #     inner_form = None
+    #     for j in range(obs_latents.shape[0]):
+    #         # print(i, j)
+    #         # print(waypoint_latents[i].shape)
+    #         # print(obs_latents[j].shape)
+    #         cossim = F.cosine_similarity(waypoint_latents[i], obs_latents[j], dim=0).float()
+    #         inputs.append(cossim)
+    #         cossim = stlcg.Expression("phi_ij", cossim) > THRESHOLD
+
+    #         if inner_form is None:
+    #             inner_form = cossim
+    #         else:
+    #             inner_form = inner_form & cossim
+    #     if outer_form is None:
+    #         outer_form = inner_form
+    #     else:
+    #         outer_form = outer_form | inner_form
+
+    """ Method 2:
+    O(n) with Until temporal operator
+    """
 
     # inputs = []
     # formula = None
@@ -243,21 +285,63 @@ def compute_stl_loss(
     #     else:
     #         formula = stlcg.Until(formula, phi_t, interval=[0,1])  # overlap=False TODO: check interval
 
-    # inputs = torch.tensor(inputs)
+    """ Method 3:
+    O(m), process observation costs in parallel
+    """
 
-    print("inputs==========", inputs)
-    
-    # STL loss
-    if formula is None:
-        raise ValueError(f"Formula is not properly defined: {self.formula}")
-    else:
-        print(formula)
-        digraph = viz.make_stl_graph(formula)
+    outer_form = None
+    THRESHOLD = 0.6  # TODO: verify that this works 
+
+    for i in range(waypoint_latents.shape[0]):
+        #TODO: temp
+        if i == 3:
+            break
+
+        # process observation latents in parallel
+        cossim = F.cosine_similarity(
+                waypoint_latents[i].unsqueeze(0),
+                obs_latents,
+                dim=1
+        )
+        inputs.append(cossim.unsqueeze(-1).unsqueeze(-1))
+        cossim = stlcg.Expression("phi_j", cossim) > THRESHOLD
+
+        if outer_form is None:
+            outer_form = cossim
+        else:
+            outer_form = outer_form | cossim
+
+    #TODO: temp
+    print(inputs[0].shape, inputs[1].shape, inputs[2].shape)
+    inputs = ((inputs[0], inputs[1]), inputs[2])
+
+    print("cossim", F.cosine_similarity(waypoint_latents[0].unsqueeze(0),
+        torch.rand(waypoint_latents[0].shape)))
+
+    # inputs = torch.tensor(inputs)
+    # print("inputs==========", min(inputs[0]), max(inputs[0]))
+
+    """ Method 4:
+    O(m)
+    """
+     
+    if outer_form is None:
+        raise ValueError(f"Formula is not properly defined.")
+
+    print(outer_form)
+
+    # saves a digraph of the STL formula
+    if visualize_formula:
+        digraph = viz.make_stl_graph(outer_form)
         viz.save_graph(digraph, "utils/formula")
         print("Saved formula CG successfully.")
 
-    robustness = (-formula.robustness(inputs)).squeeze() 
-    stl_loss += F.leaky_relu(robustness - margin).mean()
+    # compute the robustness
+    margin = 0.0
+    robustness = (-outer_form.robustness(inputs)).squeeze() 
+    stl_loss = F.leaky_relu(robustness - margin).mean()
+
+    print("STL loss:", stl_loss)
     
     return stl_loss
 
