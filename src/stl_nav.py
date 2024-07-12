@@ -21,6 +21,12 @@ sys.path.insert(0, "stlcg/src")  # disambiguate path names
 import stlcg
 import stlviz as viz
 
+"""
+TODO
+- Ensure that we don't need SAM
+- 
+
+"""
 
 sam_dir = "pretrained_weights/weight/sam_vit_h_4b8939.pth"
 
@@ -34,6 +40,10 @@ mbvit_config = {
 
 
 def load_vit_models(device: torch.device) -> Tuple[SamAutomaticMaskGenerator, MobileViT]: 
+    """
+    Loads the pre-trained ViT models onto the specified device.
+    """
+
     # specify ViT mask generators 
     weight_path = os.path.join(os.getcwd(), sam_dir)
     model_type = 'vit_h'
@@ -49,6 +59,7 @@ def load_vit_models(device: torch.device) -> Tuple[SamAutomaticMaskGenerator, Mo
     )
 
     return mb_sam, mb_vit
+    # return mb_vit
 
 
 def generate_masks(viz_obs: torch.Tensor, model) -> dict:
@@ -58,6 +69,10 @@ def generate_masks(viz_obs: torch.Tensor, model) -> dict:
 
 
 def mask_to_img(masks: dict) -> np.ndarray:
+    """
+    Converts a binary mask to a randomized-color RGB image.
+    """
+    
     sorted_anns = sorted(masks, key=(lambda x: x['area']), reverse=True)
     mask_img = np.ones((masks[0]['segmentation'].shape[0], masks[0]['segmentation'].shape[1], 3))
     for ann in sorted_anns:
@@ -75,21 +90,30 @@ def mask_to_img(masks: dict) -> np.ndarray:
     return mask_img  # Mobile-ViT only takes scalar doubles
 
 
-def generate_embeddings_from_obs(
-    viz_obs: torch.Tensor,
+def generate_latents_from_obs(
+    viz_obs_img: torch.Tensor,
     mb_sam: SamAutomaticMaskGenerator,
     mb_vit: MobileViT,
 ) -> torch.Tensor:
+    """
+    Generates latents from the observation needed for STL.
+    """
+
     # generate masks
-    viz_obs = np.moveaxis(to_numpy(viz_obs), 0, -1)
-    viz_obs = (viz_obs * 255.).astype("uint8")
-    masks = mb_sam.generate(viz_obs)
+    # viz_obs = np.moveaxis(to_numpy(viz_obs), 0, -1)
+    # viz_obs = (viz_obs * 255.).astype("uint8")
+    # masks = mb_sam.generate(viz_obs)
 
     # preprocess mask images to be encoded
-    mask_img = mask_to_img(masks)
+    # mask_img = mask_to_img(masks)
    
     # encode mask image
-    z_t = mb_vit(mask_img)
+    # z_t = mb_vit(mask_img)
+
+    # print("shape before passing to vit", viz_obs_img.shape)
+
+    # the whole point is to process the images in parallel
+    z_t = mb_vit(viz_obs_img)
 
     return z_t
 
@@ -98,95 +122,144 @@ def generate_waypoints(
     dataset: DataLoader, 
     mb_sam: SamAutomaticMaskGenerator,
     mb_vit: MobileViT,
-) -> Tuple[stlcg.STL_Formula, torch.Tensor]:
+    visualize_waypoint: bool = False,
+) -> torch.Tensor:
+    """
+    Generates latent waypoints from the full, unshuffled dataset.
+    """
+
     z_stacked = None
 
     # load last latent file if not already saved
     latent_dir = "latents"
-    latent_file = os.path.join(latent_dir, "last_saved_100x1000.pt")
+    latent_file = os.path.join(latent_dir, "last_saved.pt")
 
+    # ensure directory is created
     if not os.path.isdir(latent_dir):
+        os.makedirs(latent_dir)
+
+    if not os.path.isfile(latent_file):
         for i, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
             obs_img, goal_img, _, _, _, _, _ = data
 
+            #print("0 shape", obs_img.shape)
             obs_imgs = torch.split(obs_img, 3, dim=1)
-            viz_obs_img = TF.resize(obs_imgs[-1], VISUALIZATION_IMAGE_SIZE[::-1])
+
+            # concatenate everything together (not needed)
+            # obs_imgs = torch.cat(obs_imgs, dim=0)
+
+            # reshape to MobileViT-compatible shape
+            viz_obs_imgs = TF.resize(obs_imgs[-1], [256, 256])
+
+            # visualize one of the visualization images (optional)
+            if visualize_waypoint:
+                viz_obs_img = np.moveaxis(to_numpy(viz_obs_imgs[0]), 0, -1)
+                plt.imshow(viz_obs_img)
+                save_path = "observation.png"
+                plt.savefig(save_path)
+                wandb.log({"ex": [wandb.Image(save_path)]}, commit=False)
+
             # TODO: implement goal images
             # viz_goal_img = TF.resize(goal_img, VISUALIZATION_IMAGE_SIZE[::-1])
 
-            for obs in viz_obs_img:
-                z_t = generate_embeddings_from_obs(
-                        obs,
-                        mb_sam,
-                        mb_vit
-                )
-                
-                if z_stacked is None:
-                    z_stacked = z_t
-                else:    
-                    print("\nBEFORE")
-                    print(z_stacked.shape)
-                    print(z_t.shape)
-                    z_stacked = torch.cat((z_stacked, z_t), dim=0)
-                    print("AFTER\n", z_stacked.shape)
+            # convert the resized batch into latent vectors
+            z_t = generate_latents_from_obs(
+                    viz_obs_imgs,
+                    mb_sam,
+                    mb_vit
+            )
 
-                # TODO: this is temporary
-                if z_stacked.shape[0] == 100:
-                    break
-            break  # TODO: temp
+            print(f"shape of the stack: {z_t.shape}")
+
+            # recursively concatenate latent vectors
+            if z_stacked is None:
+                z_stacked = z_t
+            else:
+                z_stacked = torch.cat((z_stacked, z_t), dim=0)
+
+            # TODO: temporary stop point
+            if z_stacked.shape[0] == 256:
+                break
+
+            # for obs in viz_obs_img:
+            #     print("Generating embeddings from observation...")
+            #     z_t = generate_embeddings_from_obs(
+            #             obs,
+            #             mb_sam,
+            #             mb_vit
+            #             )  # TODO: error may occur here
+            #     
+            #     if z_stacked is None:
+            #         z_stacked = z_t
+            #     else:    
+            #         print("\nBEFORE")
+            #         print(z_stacked.shape)
+            #         print(z_t.shape)
+            #         z_stacked = torch.cat((z_stacked, z_t), dim=0)
+            #         print("AFTER\n", z_stacked.shape)
+
+            #     # TODO: this is temporary
+            #     if z_stacked.shape[0] == 100:
+            #         break
+            # break  # TODO: temp
 
         torch.save(z_stacked, latent_file)
+        print("Successfully saved waypoint latents!")
     else:
         z_stacked = torch.load(latent_file)
+        print("Successfully loaded waypoint latents!")
 
-    psi = None
-
-    for z_t in z_stacked:
-        cossim = 2 * torch.randn(1) - 1
-        phi_t = stlcg.Expression('phi_t', cossim) > 0
-
-        if psi is None:
-            psi = phi_t
-        else:
-            psi = stlcg.Until(psi, phi_t)  # TODO: change to Until operator
-
-    return psi, z_stacked
+    return z_stacked
 
 
 def compute_stl_loss(
     viz_obs: torch.Tensor, 
-    z_embeddings: torch.Tensor, 
-    formula: stlcg.STL_Formula,
+    waypoint_latents: torch.Tensor, 
+    # formula: stlcg.STL_Formula,
     mb_sam: SamAutomaticMaskGenerator,
     mb_vit: MobileViT,
 ) -> torch.Tensor:
-    stl_loss = 0
-    margin = 0.05
+    margin = 0.0
 
-    for i, obs in enumerate(viz_obs):
-        z = generate_embeddings_from_obs(
-                obs,
-                mb_sam,
-                mb_vit
-        )
-        
-        inputs = []
-        for z_t in z_embeddings:
-            cossim = F.cosine_similarity(z_t, z, dim=1).float()
-            inputs.append(cossim)
-
-        inputs = torch.tensor(inputs)
-
-        print("inputs==========", inputs)
-        
-        # STL loss
-        if formula is None:
-            raise ValueError(f"Formula is not properly defined: {self.formula}")
-
-        robustness = (-formula.robustness(inputs)).squeeze() 
-        stl_loss += F.leaky_relu(robustness - margin).mean()
+    obs_latents = generate_latents_from_obs(viz_obs, mb_sam, mb_vit)
     
-    return stl_loss / viz_obs.shape[0]  # TODO: check if this is right
+    # generate STL formula and inputs for robustness
+
+
+
+    # inputs = []
+    # formula = None
+    # for z_t in z_embeddings:
+    #     cossim = F.cosine_similarity(z_t, z, dim=1).float()
+    #     inputs.append(cossim)
+
+    #     # cossim = 2 * torch.randn(1) - 1
+
+    #     # atomic proposition for cosine similarity threshold
+    #     phi_t = stlcg.Expression('phi_t', cossim) > 0  # TODO: consider threshold value as well
+
+    #     if formula is None:
+    #         formula = phi_t
+    #     else:
+    #         formula = stlcg.Until(formula, phi_t, interval=[0,1])  # overlap=False TODO: check interval
+
+    # inputs = torch.tensor(inputs)
+
+    print("inputs==========", inputs)
+    
+    # STL loss
+    if formula is None:
+        raise ValueError(f"Formula is not properly defined: {self.formula}")
+    else:
+        print(formula)
+        digraph = viz.make_stl_graph(formula)
+        viz.save_graph(digraph, "utils/formula")
+        print("Saved formula CG successfully.")
+
+    robustness = (-formula.robustness(inputs)).squeeze() 
+    stl_loss += F.leaky_relu(robustness - margin).mean()
+    
+    return stl_loss
 
 
 def visualize_sam_maps(
@@ -252,6 +325,7 @@ def visualize_sam_maps(
             for a in ax.flatten():
                 a.axis('off')
 
+            visualize_path = "examples"
             map_save_path = os.path.join(visualize_path, f'maps_{i}.png')
             plt.savefig(map_save_path)
 
