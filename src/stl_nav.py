@@ -1,19 +1,24 @@
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
+from torchvision import transforms
 from torch.utils.data import DataLoader
 
 import sys
-import wandb
 from typing import Tuple
-import numpy as np
-import matplotlib.pyplot as plt
 import os
-import tqdm
-import cv2
 import warnings
 import time
 import gc
+import argparse
+from collections import namedtuple
+
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+import tqdm
+from PIL import Image
+import wandb
 
 # meant for MobileViT arch, be aware of real warnings
 warnings.filterwarnings("ignore")
@@ -21,7 +26,7 @@ warnings.filterwarnings("ignore")
 from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator
 from vit_pytorch.mobile_vit import MobileViT
 
-sys.path.insert(0, 'visualnav-transformer/train')
+sys.path.insert(0, "visualnav-transformer/train")
 from vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
 from vint_train.visualizing.visualize_utils import to_numpy, from_numpy
 
@@ -29,38 +34,106 @@ sys.path.insert(0, "stlcg/src")  # disambiguate path names
 import stlcg
 import stlviz as viz
 
+# loading in deeplabv3 custom repo
+sys.path.insert(0, "DeepLabV3Plus-Pytorch")
+from network import modeling
+
 """
 TODO
-- Ensure that we don't need SAM
-- 
+- implement deeplabv3
+- add gpu capabilities, sort out memory issues
+- clean up code (comment, delete unnecessary snippets, ...) 
 
+COMPLETED
+- added no grads to inference
+- added deeplabv3
+- 
 """
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:15000"
 
-sam_dir = "pretrained_weights/weight/sam_vit_h_4b8939.pth"
+# for visualization class color mappings
+CityscapesClass = namedtuple('CityscapesClass', ['name', 'id', 'train_id', 'category', 'category_id',
+                                                     'has_instances', 'ignore_in_eval', 'color'])
+classes = [
+    CityscapesClass('unlabeled',            0, 255, 'void', 0, False, True, (0, 0, 0)),
+    CityscapesClass('ego vehicle',          1, 255, 'void', 0, False, True, (0, 0, 0)),
+    CityscapesClass('rectification border', 2, 255, 'void', 0, False, True, (0, 0, 0)),
+    CityscapesClass('out of roi',           3, 255, 'void', 0, False, True, (0, 0, 0)),
+    CityscapesClass('static',               4, 255, 'void', 0, False, True, (0, 0, 0)),
+    CityscapesClass('dynamic',              5, 255, 'void', 0, False, True, (111, 74, 0)),
+    CityscapesClass('ground',               6, 255, 'void', 0, False, True, (81, 0, 81)),
+    CityscapesClass('road',                 7, 0, 'flat', 1, False, False, (128, 64, 128)),
+    CityscapesClass('sidewalk',             8, 1, 'flat', 1, False, False, (244, 35, 232)),
+    CityscapesClass('parking',              9, 255, 'flat', 1, False, True, (250, 170, 160)),
+    CityscapesClass('rail track',           10, 255, 'flat', 1, False, True, (230, 150, 140)),
+    CityscapesClass('building',             11, 2, 'construction', 2, False, False, (70, 70, 70)),
+    CityscapesClass('wall',                 12, 3, 'construction', 2, False, False, (102, 102, 156)),
+    CityscapesClass('fence',                13, 4, 'construction', 2, False, False, (190, 153, 153)),
+    CityscapesClass('guard rail',           14, 255, 'construction', 2, False, True, (180, 165, 180)),
+    CityscapesClass('bridge',               15, 255, 'construction', 2, False, True, (150, 100, 100)),
+    CityscapesClass('tunnel',               16, 255, 'construction', 2, False, True, (150, 120, 90)),
+    CityscapesClass('pole',                 17, 5, 'object', 3, False, False, (153, 153, 153)),
+    CityscapesClass('polegroup',            18, 255, 'object', 3, False, True, (153, 153, 153)),
+    CityscapesClass('traffic light',        19, 6, 'object', 3, False, False, (250, 170, 30)),
+    CityscapesClass('traffic sign',         20, 7, 'object', 3, False, False, (220, 220, 0)),
+    CityscapesClass('vegetation',           21, 8, 'nature', 4, False, False, (107, 142, 35)),
+    CityscapesClass('terrain',              22, 9, 'nature', 4, False, False, (152, 251, 152)),
+    CityscapesClass('sky',                  23, 10, 'sky', 5, False, False, (70, 130, 180)),
+    CityscapesClass('person',               24, 11, 'human', 6, True, False, (220, 20, 60)),
+    CityscapesClass('rider',                25, 12, 'human', 6, True, False, (255, 0, 0)),
+    CityscapesClass('car',                  26, 13, 'vehicle', 7, True, False, (0, 0, 142)),
+    CityscapesClass('truck',                27, 14, 'vehicle', 7, True, False, (0, 0, 70)),
+    CityscapesClass('bus',                  28, 15, 'vehicle', 7, True, False, (0, 60, 100)),
+    CityscapesClass('caravan',              29, 255, 'vehicle', 7, True, True, (0, 0, 90)),
+    CityscapesClass('trailer',              30, 255, 'vehicle', 7, True, True, (0, 0, 110)),
+    CityscapesClass('train',                31, 16, 'vehicle', 7, True, False, (0, 80, 100)),
+    CityscapesClass('motorcycle',           32, 17, 'vehicle', 7, True, False, (0, 0, 230)),
+    CityscapesClass('bicycle',              33, 18, 'vehicle', 7, True, False, (119, 11, 32)),
+    CityscapesClass('license plate',        -1, 255, 'vehicle', 7, False, True, (0, 0, 142)),
+]
 
-mbvit_config = {
-    'image_size': (256, 256),
-    'dims': [96, 120, 144],
-    'channels': [16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 384],
-    #'channels': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], 
-    'num_classes': 1000,
-}
+train_id_to_color = [c.color for c in classes if (c.train_id != -1 and c.train_id != 255)]
+train_id_to_color.append([0, 0, 0])
+train_id_to_color = np.array(train_id_to_color)
+
+train_id_to_name = [c.name for c in classes if (c.train_id != -1 and c.train_id != 255)]
+train_id_to_name = np.array(train_id_to_name)
 
 
-def load_vit_models(device: torch.device) -> Tuple[SamAutomaticMaskGenerator, MobileViT]: 
+def load_models(device: torch.device): 
     """
     Loads the pre-trained ViT models onto the specified device.
     """
+    weights_dir = os.path.join(os.getcwd(), "pretrained_weights")
 
-    # specify ViT mask generators 
-    weight_path = os.path.join(os.getcwd(), sam_dir)
-    model_type = 'vit_h'
-    model_class = sam_model_registry[model_type](checkpoint=weight_path).to(device=device).eval()
-    mb_sam = SamAutomaticMaskGenerator(model_class)
+    # sam_dir = "pretrained_weights/weight/sam_vit_h_4b8939.pth"
+    deeplab_dir = os.path.join(
+            weights_dir,
+            "deeplab/best_deeplabv3plus_resnet101_cityscapes_os16.pth.tar"
+    )
 
-    # specify ViT image encoder
+    mbvit_config = {
+        'image_size': (256, 256),
+        'dims': [96, 120, 144],
+        'channels': [16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 384],
+        #'channels': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], 
+        'num_classes': 1000,
+    }
+
+    # semantic segmentation model
+    # deep_lab = torch.hub.load("pytorch/vision:v0.10.0", "deeplabv3_resnet50", pretrained=True).eval()
+    deeplab = modeling.__dict__["deeplabv3plus_resnet101"](num_classes=19, output_stride=8)
+    deeplab.load_state_dict(torch.load(deeplab_dir)["model_state"])
+
+    # test: non-semantic segmentation model
+    # # specify ViT mask generators 
+    # weight_path = os.path.join(os.getcwd(), sam_dir)
+    # model_type = 'vit_h'
+    # model_class = sam_model_registry[model_type](checkpoint=weight_path).to(device=device).eval()
+    # seg_model = SamAutomaticMaskGenerator(model_class)
+
+    # image encoder
     mb_vit = MobileViT(
             image_size=mbvit_config['image_size'],
             dims=mbvit_config['dims'],
@@ -69,7 +142,8 @@ def load_vit_models(device: torch.device) -> Tuple[SamAutomaticMaskGenerator, Mo
     )
     #.to(device)
 
-    return mb_sam, mb_vit
+    return deeplab.to(device), mb_vit.to(device)
+    # return seg_model, mb_vit
     # return mb_vit
 
 
@@ -102,44 +176,89 @@ def mask_to_img(masks: dict) -> np.ndarray:
 
 
 def generate_latents_from_obs(
-    viz_obs_img: torch.Tensor,
-    mb_sam: SamAutomaticMaskGenerator,
+    obs_imgs: torch.Tensor,
+    seg_model,
     mb_vit: MobileViT,
     device: torch.device,
+    visualize: bool = True,
 ) -> torch.Tensor:
     """
     Generates latents from the observation needed for STL.
     """
+    if torch.cuda.is_available():
+        obs_imgs = obs_imgs.to(device)
 
-    # generate masks
-    # viz_obs = np.moveaxis(to_numpy(viz_obs), 0, -1)
-    # viz_obs = (viz_obs * 255.).astype("uint8")
-    # masks = mb_sam.generate(viz_obs)
+    with torch.no_grad():
+        outputs = seg_model(obs_imgs)
 
-    # preprocess mask images to be encoded
+    # return the max probability for each image
+    preds = outputs.max(1)[1].detach().cpu().numpy()
+
+    preds[preds == 255] = 19
+    preds = train_id_to_name[preds]
+    print(preds.shape)
+
+    if visualize:
+        preds[preds == 255] = 19
+        colorized_preds = train_id_to_color[preds].astype("uint8")
+        # print(colorized_preds.shape)  # (256, 256, 256, 3), which is expected
+        colorized_preds = Image.fromarray(colorized_preds[0])
+
+        # # visualize output mask classes
+        # palette = torch.tensor([2 ** 25 - 1, 2 ** 15 - 1, 2 ** 21 - 1])
+        # colors = torch.as_tensor([i for i in range(21)])[:, None] * palette
+        # colors = (colors % 255).numpy().astype("uint8")
+
+        # r = Image.fromarray(output_predictions.byte().cpu().numpy()).resize((160, 120))
+        # r.putpalette(colors)
+
+        # plt.imshow(r)
+
+        images = []
+
+        mask_dir = "mask_img.png"
+        plt.imshow(colorized_preds)
+        plt.savefig(mask_dir)
+        images.append(wandb.Image(mask_dir))
+
+        obs_dir = "obs_img.png"
+        plt.imshow(np.moveaxis(obs_imgs[0].cpu().numpy(), 0, -1))
+        plt.savefig(obs_dir)
+        images.append(wandb.Image(obs_dir))
+        
+        # requires an error or complete successful run
+        wandb.log({"ex": images}, commit=False) 
+    
+    # # generate masks
+    # obs_imgs = np.moveaxis(to_numpy(obs_imgs), 1, -1)
+    # obs_imgs = (obs_imgs * 255.).astype("uint8")
+
+    # masks = seg_model.generate(obs_img)
+
+    # # preprocess mask images to be encoded
     # mask_img = mask_to_img(masks)
    
-    # encode mask image
-    # z_t = mb_vit(mask_img)
+    # # encode mask image
+    # # z_t = mb_vit(mask_img)
 
-    # print("shape before passing to vit", viz_obs_img.shape)
+    # print("shape before passing to vit", obs_imgs.shape)
 
     # gc.collect()
     # torch.cuda.empty_cache()
 
     # the whole point is to process the images in parallel
-    #z_t = mb_vit(viz_obs_img.to(device))
-    z_t = mb_vit(viz_obs_img)
+    # z_t = mb_vit(obs_imgs.to(device))
+    # z_t = mb_vit(obs_imgs)
 
     return z_t
 
 
 def generate_waypoints(
     dataset: DataLoader, 
-    mb_sam: SamAutomaticMaskGenerator,
+    seg_model,
     mb_vit: MobileViT,
     device: torch.device,
-    visualize_waypoint: bool = False,
+    visualize: bool = False,
 ) -> torch.Tensor:
     """
     Generates latent waypoints from the full, unshuffled dataset.
@@ -161,26 +280,41 @@ def generate_waypoints(
     #gc.collect()
     #torch.cuda.empty_cache()
 
+    preprocess = transforms.Compose([
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
     # if the folder has no files, generate new latents
     if len(os.listdir(latent_dir)) == 0:
         for i, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
-            # TODO:test
+            # TODO: try utilizing GPU memory
             #gc.collect()
             #torch.cuda.empty_cache()
 
             obs_img, _, _, _, _, _, _ = data
 
-            #print("0 shape", obs_img.shape)
             obs_imgs = torch.split(obs_img, 3, dim=1)
 
             # concatenate everything together (not needed)
             # obs_imgs = torch.cat(obs_imgs, dim=0)
 
             # reshape to MobileViT-compatible shape
-            obs_imgs = TF.resize(obs_imgs[-1], [256, 256])
+            # obs_imgs = TF.resize(obs_imgs[-1], [256, 256])
+
+            # reshape to DeepLab compatible shape
+            obs_imgs = [preprocess(obs_img) for obs_img in obs_imgs]
+
+            # convert the resized batch into latent vectors
+            z_w = generate_latents_from_obs(
+                    obs_imgs,
+                    seg_model,
+                    mb_vit,
+                    device,
+            )
+            print(f"shape of the stack: {z_w.shape}")
 
             # save the visualization images (optional)
-            if visualize_waypoint:
+            if visualize:
                 for img in obs_imgs:
                     save_path = f"observation_{i}_{j}.png"
 
@@ -194,16 +328,6 @@ def generate_waypoints(
 
             # TODO: implement goal images
             # viz_goal_img = TF.resize(goal_img, VISUALIZATION_IMAGE_SIZE[::-1])
-
-            # convert the resized batch into latent vectors
-            z_w = generate_latents_from_obs(
-                    obs_imgs,
-                    mb_sam,
-                    mb_vit,
-                    device,
-            )
-
-            print(f"shape of the stack: {z_w.shape}")
 
             # recursively concatenate latent vectors
             # if z_stacked is None:
@@ -221,7 +345,7 @@ def generate_waypoints(
             #     print("Generating embeddings from observation...")
             #     z_t = generate_embeddings_from_obs(
             #             obs,
-            #             mb_sam,
+            #             seg_model,
             #             mb_vit
             #             )  # TODO: error may occur here
             #     
@@ -254,7 +378,7 @@ def generate_waypoints(
         del loaded_latent
         gc.collect()
 
-        print("Successfully loaded waypoint latents!")
+        print("Successfully loaded waypoint latents! Shape:", z_w.shape)
 
     return z_w
 
@@ -264,9 +388,9 @@ def compute_stl_loss(
     wp_latents: torch.Tensor, 
     device: torch.device,
     # formula: stlcg.STL_Formula,
-    mb_sam: SamAutomaticMaskGenerator,
+    seg_model,
     mb_vit: MobileViT,
-    visualize_formula: bool = False,
+    visualize: bool = False,
 ) -> torch.Tensor:
     """
     Generates STL formula and inputs for robustness, while computing the STL
@@ -274,7 +398,7 @@ def compute_stl_loss(
     """
     start_time = time.time()
 
-    obs_latents = generate_latents_from_obs(viz_obs, mb_sam, mb_vit, device).to(device)
+    obs_latents = generate_latents_from_obs(viz_obs, seg_model, mb_vit, device).to(device)
     wp_latents = wp_latents.to(device)
 
     print(f"time: {time.time() - start_time}")
@@ -412,7 +536,7 @@ def compute_stl_loss(
         raise ValueError(f"Formula is not properly defined.")
     
     # saves a digraph of the STL formula
-    if visualize_formula:
+    if visualize:
         digraph = viz.make_stl_graph(outer_form)
         viz.save_graph(digraph, "utils/formula")
         print("Saved formula CG successfully.")
