@@ -1,0 +1,1 @@
+docker run -v /media/corallab-s1/2tbhdd1/Jeremy/:/app/ lu1008 python /app/visualnav-transformer/train/data_split.py -i /app/data/recon -d recon -o /app/visualnav-transformer/train/vint_train/data/data_splits/

@@ -45,7 +45,7 @@ RUN rm -r /temp && \
     ln -s /usr/local/bin/python3 /usr/local/bin/python && \
     ln -s /usr/local/bin/pip3 /usr/local/bin/pip
 
-# required for dependencies
+# PIP: required for dependencies
 RUN pip3 install --extra-index-url https://rospypi.github.io/simple/ sensor-msgs geometry-msgs rosbag roslz4 rospkg && \
     pip3 install torch==1.10.2+cu113 torchvision==0.11.3+cu113 -f https://download.pytorch.org/whl/cu113/torch_stable.html && \
     pip3 install tqdm==4.64.0 git+https://github.com/ildoonet/pytorch-gradual-warmup-lr.git opencv-python==4.6.0.66 h5py==3.6.0 wandb==0.12.18 prettytable efficientnet-pytorch warmup-scheduler diffusers==0.11.1 lmdb vit-pytorch positional-encodings requests beautifulsoup4 matplotlib numpy pyyaml ipython graphviz timm PyGithub vit-pytorch visdom scikit-learn && \
@@ -67,8 +67,10 @@ RUN python delete_roscpp_loggers.py
 
 RUN git clone https://github.com/real-stanford/diffusion_policy.git && \
     git clone https://github.com/VainF/DeepLabV3Plus-Pytorch.git
+
+# PIP
 RUN pip3 install -e diffusion_policy 
-RUN pip install git+https://github.com/ChaoningZhang/MobileSAM.git 
+RUN pip3 install git+https://github.com/ChaoningZhang/MobileSAM.git transformers huggingface_hub accelerate
 
 # RUN mkdir -p /data/sacson/huron
 

@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from torchvision import transforms
 from torch.utils.data import DataLoader
+from torch import autocast
 
 import sys
 from typing import Tuple
@@ -12,6 +13,8 @@ import time
 import gc
 import argparse
 from collections import namedtuple
+import heapq
+import shutil
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -25,6 +28,8 @@ warnings.filterwarnings("ignore")
 
 from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator
 from vit_pytorch.mobile_vit import MobileViT
+from diffusers import StableDiffusionPipeline
+from huggingface_hub import login
 
 sys.path.insert(0, "visualnav-transformer/train")
 from vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
@@ -40,17 +45,24 @@ from network import modeling
 
 """
 TODO
-- implement deeplabv3
-- add gpu capabilities, sort out memory issues
+- handle multiple prompts with stable diffusion
+- return intervals for each waypoint, if it sees ground ignore it
+- sort out memory issues
 - clean up code (comment, delete unnecessary snippets, ...) 
+- get sacson to work again
+- remove process_data + vint_train dirs
 
 COMPLETED
 - added no grads to inference
 - added deeplabv3
-- 
+- added stable diffusion
 """
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:15000"
+
+# print(os.getenv("HUGGINGFACE_HUB_TOKEN"))
+login(os.getenv("HUGGINGFACE_HUB_TOKEN"))
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:21000"
 
 # for visualization class color mappings
 CityscapesClass = namedtuple('CityscapesClass', ['name', 'id', 'train_id', 'category', 'category_id',
@@ -142,7 +154,14 @@ def load_models(device: torch.device):
     )
     #.to(device)
 
-    return deeplab.to(device), mb_vit.to(device)
+    # text-to-image model
+    pipe = StableDiffusionPipeline.from_pretrained(
+            "CompVis/stable-diffusion-v1-4",
+            cache_dir=os.path.join(weights_dir, "stable_diffusion"),
+            use_auth_token=True,
+    )
+
+    return deeplab.to(device), mb_vit.to(device), pipe.to(device)
     # return seg_model, mb_vit
     # return mb_vit
 
@@ -178,57 +197,217 @@ def mask_to_img(masks: dict) -> np.ndarray:
 def generate_latents_from_obs(
     obs_imgs: torch.Tensor,
     seg_model,
-    mb_vit: MobileViT,
+    enc_model: MobileViT,
+    gen_model,
+    gen_subgoal: bool,
     device: torch.device,
-    visualize: bool = True,
+    data_pos: int = 0,  # TODO: fix this
+    visualize: bool = False,
 ) -> torch.Tensor:
     """
     Generates latents from the observation needed for STL.
+
+    Args:
+        obs_imgs: observation images shaped 96x96.
+        seg_model: semantic segmentation model, DeepLabV3.
+        enc_model: encoder model for latent embeddings, MobileViT.
+        gen_model: text-to-image model, StableDiffusion.
+        device: the device to move tensors onto during inference.
+        gen_subgoal: differentiates training/pre-training processes.
+        data_pos: position in the dataset loop for calculating intervals.
+        visualize: visualize obs segmentation images with WandB.
+
+    Returns:
+        z_batch: waypoint latents + STL intervals for the current batch.
     """
+
+    def landmark_criteria(preds_unique: np.ndarray, n: int = 7) -> bool:
+        """
+        Images must have the correct object landmarks, have enough pixel
+        predictions, and have enough landmarks.
+
+        TODO: counts, object persistence
+
+        for now, the number is equal to 7. one one hand, we want to create
+        descriptive prompts for StableDiffusion, but on the other, we want to
+        find one major landmark.
+        we have static landmarks for now.
+        relative frequency shouldn't work. counts make more sense.
+        """
+        # object_landmarks = [2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16, 17, 18]
+        # object_landmarks = np.array([2, 3, 4, 5, 6, 7])
+        object_landmarks = np.array([2, 6, 7, 18])
+       
+        in_landmarks = np.intersect1d(preds_unique, object_landmarks, assume_unique=True)
+
+        # skip if none of the conditions satisfy
+        #return len(preds_unique) <= n and \
+               #len(in_landmarks) != 0
+        return len(in_landmarks) != 0
+
+    enc_img_size = (256, 256)  # for MobileViT inputs
+    intervals = []
+    n = 3  # for filter criteria
+
     if torch.cuda.is_available():
         obs_imgs = obs_imgs.to(device)
 
-    with torch.no_grad():
-        outputs = seg_model(obs_imgs)
+    if gen_subgoal:
+        with torch.no_grad():
+            outputs = seg_model(obs_imgs)
 
-    # return the max probability for each image
-    preds = outputs.max(1)[1].detach().cpu().numpy()
-
-    preds[preds == 255] = 19
-    preds = train_id_to_name[preds]
-    print(preds.shape)
-
-    if visualize:
+        # return the max probability for each image
+        preds = outputs.max(1)[1].detach().cpu().numpy()
         preds[preds == 255] = 19
-        colorized_preds = train_id_to_color[preds].astype("uint8")
-        # print(colorized_preds.shape)  # (256, 256, 256, 3), which is expected
-        colorized_preds = Image.fromarray(colorized_preds[0])
+        # format of image doesn't matter, flatten
+        preds = preds.reshape(preds.shape[0], -1)
 
-        # # visualize output mask classes
-        # palette = torch.tensor([2 ** 25 - 1, 2 ** 15 - 1, 2 ** 21 - 1])
-        # colors = torch.as_tensor([i for i in range(21)])[:, None] * palette
-        # colors = (colors % 255).numpy().astype("uint8")
+        assert(preds.shape == (256, 96 ** 2))
 
-        # r = Image.fromarray(output_predictions.byte().cpu().numpy()).resize((160, 120))
-        # r.putpalette(colors)
+        preds_comb = [np.unique(p, return_counts=True)
+                for p in preds]
+        # preds_comb = [(set(p), count) for (p, count) in preds_comb]
 
-        # plt.imshow(r)
-
-        images = []
-
-        mask_dir = "mask_img.png"
-        plt.imshow(colorized_preds)
-        plt.savefig(mask_dir)
-        images.append(wandb.Image(mask_dir))
-
-        obs_dir = "obs_img.png"
-        plt.imshow(np.moveaxis(obs_imgs[0].cpu().numpy(), 0, -1))
-        plt.savefig(obs_dir)
-        images.append(wandb.Image(obs_dir))
+        # filter out predictions
+        preds = []
+        # object_landmarks = set([i for i in range(19)]) - {0, 1, 8, 9, 10}
         
-        # requires an error or complete successful run
-        wandb.log({"ex": images}, commit=False) 
-    
+        # retrieve n-top unique classes
+        for i, (preds_unique, counts) in enumerate(preds_comb):
+            # if there aren't enough landmarks or not an object landmark, skip
+            if not landmark_criteria(preds_unique, n):
+                continue
+            
+            # don't do unnecessary computation if not necessary
+            # if preds_unique.shape[0] < n:
+            top_idx = np.arange(len(preds_unique))
+            #else: 
+            # top_idx = np.argpartition(preds_unique, -n)[-n:]
+            # top_idx = heapq.nlargest(n, preds_unique)
+            n_top = preds_unique[top_idx]
+
+            preds.append(n_top)
+            intervals.append([data_pos + i, data_pos + i + 1])
+
+        del preds_comb
+        gc.collect()
+
+        intervals = np.array(intervals)
+        print("INTERVAL SHAPE", intervals.shape)
+
+        # print(preds_flat.shape)
+
+        # preds_combined = [np.unique(p, return_counts=True) for p in preds_flat]
+
+        # preds_unique = preds_combined[:, 0]
+        # counts = preds_combined[:, 1]
+        
+        # print(counts)
+
+        # freq_idx = np.argmax(counts)
+        # pred_id = preds_unique[freq_idx]
+
+        # convert to class labels based on indices
+        preds = [train_id_to_name[p] for p in preds]
+        print(len(preds))
+        
+        preds = [" and ".join(preds[i].reshape(-1)) \
+                for i in range(len(preds))
+        ]
+
+        print("PROMPTS", preds[0:4])
+
+        subgoal_imgs = []
+        dis_imgs = []
+        #height = 128
+        #width = 128
+
+        with torch.no_grad():
+            with autocast("cuda"):
+                # TODO: TEMP add full prompts, filter more
+                limit = 10
+                for i in range(len(preds)):
+                    if i == limit:
+                        break
+                    output_img = gen_model(preds[i]).images[0]
+                    output_img = TF.pil_to_tensor(output_img)
+                    # output_img = TF.resize(output_img, enc_img_size)
+                    subgoal_imgs.append(output_img)
+
+                    save_path = f"subgoal_{i}.png"
+                    plt.imshow(np.moveaxis(to_numpy(output_img), 0, -1))
+                    plt.savefig(save_path)
+                    dis_imgs.append(wandb.Image(save_path))
+                  
+                print("LOGGED!")
+                wandb.log({"ex": dis_imgs}, commit=False)
+                raise Exception("test")
+
+                intervals = intervals[:limit]
+                    
+        # nothing else is needed except the images and intervals
+        del preds
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        subgoal_imgs = torch.stack(subgoal_imgs).float().to(device)
+        print(subgoal_imgs.shape)
+        with torch.no_grad():
+            z_batch = (enc_model(subgoal_imgs), intervals)
+
+        del subgoal_imgs
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        if visualize:
+            dis_imgs = []
+            for i in range(len(preds)):
+                colorized_preds = train_id_to_color[preds].astype("uint8")
+                # print(colorized_preds.shape)  # (256, 256, 256, 3), which is expected
+                colorized_preds = Image.fromarray(colorized_preds[i])
+
+                # # visualize output mask classes
+                # palette = torch.tensor([2 ** 25 - 1, 2 ** 15 - 1, 2 ** 21 - 1])
+                # colors = torch.as_tensor([i for i in range(21)])[:, None] * palette
+                # colors = (colors % 255).numpy().astype("uint8")
+
+                # r = Image.fromarray(output_predictions.byte().cpu().numpy()).resize((160, 120))
+                # r.putpalette(colors)
+
+                # plt.imshow(r)
+
+                mask_dir = f"mask_img_{i}.png"
+                plt.imshow(colorized_preds)
+                plt.savefig(mask_dir)
+                dis_imgs.append(wandb.Image(mask_dir))
+
+                obs_dir = f"obs_img_{i}.png"
+                plt.imshow(np.moveaxis(obs_imgs[i].cpu().numpy(), 0, -1))
+                plt.savefig(obs_dir)
+                dis_imgs.append(wandb.Image(obs_dir))
+                
+                # requires an error or complete successful run
+                if i == 9:
+                    break
+            wandb.log({"ex2": dis_imgs}, commit=False)
+
+        return z_batch
+    else:
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        obs_imgs = TF.resize(obs_imgs, enc_img_size)
+        # no gradient accumulation works wonders
+        with torch.no_grad():
+            z_batch = (enc_model(obs_imgs), intervals)
+
+        del obs_imgs
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        return z_batch 
+      
+
     # # generate masks
     # obs_imgs = np.moveaxis(to_numpy(obs_imgs), 1, -1)
     # obs_imgs = (obs_imgs * 255.).astype("uint8")
@@ -250,31 +429,48 @@ def generate_latents_from_obs(
     # z_t = mb_vit(obs_imgs.to(device))
     # z_t = mb_vit(obs_imgs)
 
-    return z_t
+    return z_batch
 
 
 def generate_waypoints(
     dataset: DataLoader, 
     seg_model,
-    mb_vit: MobileViT,
+    enc_model: MobileViT,
+    gen_model,
     device: torch.device,
+    load_waypoints: bool = False,
     visualize: bool = False,
 ) -> torch.Tensor:
     """
     Generates latent waypoints from the full, unshuffled dataset.
-    """
 
+    Args:
+        dataset: unshuffled dataset to load batches in.
+        seg_model: semantic segmentation model for class labels.
+        enc_model: encoder model for waypoint latents.
+        gen_model: text-to-image model for subgoal generation.
+        device: current memory device.
+        load_waypoints: determines whether to generate or load waypoint files.
+        visualize: waypoint visualization boolean.
+
+    Returns:
+        z_w: the full waypoint latents as a tensor.
+    """
     z_stacked = None
 
     # load last latent file if not already saved
     latent_dir = "latents"
-    latent_file = os.path.join(latent_dir, "last_saved.pt")
+    latent_file = os.path.join(latent_dir, "last_saved_diffusion.pt")
 
     # ensure directory is created
     if not os.path.isdir(latent_dir):
         os.makedirs(latent_dir)
 
+    # # TODO: TEMP
+    # shutil.rmtree(latent_dir)
+
     wandb_images = []
+    batch_size = 256  # for intervals
 
     # TODO: test
     #gc.collect()
@@ -285,8 +481,8 @@ def generate_waypoints(
     ])
 
     # if the folder has no files, generate new latents
-    if len(os.listdir(latent_dir)) == 0:
-        for i, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
+    if not load_waypoints:  # TODO: change to automate
+        for idx, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
             # TODO: try utilizing GPU memory
             #gc.collect()
             #torch.cuda.empty_cache()
@@ -303,15 +499,22 @@ def generate_waypoints(
 
             # reshape to DeepLab compatible shape
             obs_imgs = [preprocess(obs_img) for obs_img in obs_imgs]
+            obs_imgs = torch.stack(obs_imgs)[-1]  # TODO: see if taking more images suffices
 
             # convert the resized batch into latent vectors
-            z_w = generate_latents_from_obs(
-                    obs_imgs,
-                    seg_model,
-                    mb_vit,
-                    device,
+            z_batch = generate_latents_from_obs(
+                    obs_imgs=obs_imgs,
+                    seg_model=seg_model,
+                    enc_model=enc_model,
+                    gen_model=gen_model,
+                    gen_subgoal=True,
+                    device=device,
+                    data_pos=batch_size * idx,
+                    visualize=False,
             )
-            print(f"shape of the stack: {z_w.shape}")
+            print(f"shape of the stack: {z_batch[0].shape}, {z_batch[1].shape}")
+
+            assert z_batch[0].shape[0] == z_batch[1].shape[0]
 
             # save the visualization images (optional)
             if visualize:
@@ -335,11 +538,10 @@ def generate_waypoints(
             # else:
             #     z_stacked = torch.cat((z_stacked, z_w), dim=0)
 
-            torch.save(z_w, latent_file + f"_{i}")
-
-            # TODO: temporary stop point
-            if z_w.size(0) == 512:
-                break
+            torch.save(z_batch, latent_file + f"_{idx}")
+            # # TODO: temporary stop point
+            # if z_batch[0].size(0) > 2000:
+            #     break
 
             # for obs in viz_obs_img:
             #     print("Generating embeddings from observation...")
@@ -364,32 +566,43 @@ def generate_waypoints(
             # break  # TODO: temp
 
         # torch.save(z_stacked, latent_file)
+        # torch.save(z_batch, latent_file)
         print("Successfully saved waypoint latents!")
+
+        # TODO: Program doesn't need to continue at this point
+        sys.exit()
     else:
         z_w = None
+        intervals = None
         for root, dirs, files in os.walk(latent_dir):
             for f in tqdm.tqdm(files, "Loading waypoints..."):
-                loaded_latent = torch.load(os.path.join(root, f))
+                batch = torch.load(os.path.join(root, f))
+                
                 if z_w is None:
-                    z_w = loaded_latent
+                    z_w = batch[0]
+                    intervals = batch[1]
                 else:
-                    z_w = torch.cat((z_w, loaded_latent), dim=0)
+                    z_w = torch.cat((z_w, batch[0]))
+                    intervals = np.concatenate((intervals, batch[1]))
 
-        del loaded_latent
+        del batch  # final batch should be freed
         gc.collect()
 
-        print("Successfully loaded waypoint latents! Shape:", z_w.shape)
+        assert z_w.shape[0] == intervals.shape[0]
 
-    return z_w
+        print(f"Successfully loaded waypoint latents! Shapes: {z_w.shape}, {intervals.shape}")
+
+    return z_w, intervals
 
 
 def compute_stl_loss(
-    viz_obs: torch.Tensor, 
+    obs_imgs: torch.Tensor, 
     wp_latents: torch.Tensor, 
     device: torch.device,
     # formula: stlcg.STL_Formula,
     seg_model,
-    mb_vit: MobileViT,
+    enc_model: MobileViT,
+    gen_model=None,
     visualize: bool = False,
 ) -> torch.Tensor:
     """
@@ -398,8 +611,19 @@ def compute_stl_loss(
     """
     start_time = time.time()
 
-    obs_latents = generate_latents_from_obs(viz_obs, seg_model, mb_vit, device).to(device)
-    wp_latents = wp_latents.to(device)
+    # don't need intervals for observation latents
+    obs_latents, _ = generate_latents_from_obs(
+            obs_imgs=obs_imgs,
+            seg_model=seg_model,
+            enc_model=enc_model,
+            gen_model=gen_model,
+            device=device,
+            data_pos=None,
+            gen_subgoal=False,
+    )
+
+    intervals = wp_latents[1]  # tricky, careful about ordering here
+    wp_latents = wp_latents[0].reshape(-1, wp_latents[0].size(-1)).to(device)
 
     print(f"time: {time.time() - start_time}")
 
@@ -493,7 +717,7 @@ def compute_stl_loss(
     # print("cossim", F.cosine_similarity(wp_latents[0].unsqueeze(0),
         # torch.rand(wp_latents[0].shape)))
 
-    # Method 4: O(m): Method 3 + temporal relationship
+    # Method 4: O(1): Method 3 + temporal relationship
     
     """
     Broadcast each latent waypoint to all latent obs:
@@ -501,14 +725,18 @@ def compute_stl_loss(
     (2) Broadcast obs_latents to each wp_latent.
     """
     cos_sims = F.cosine_similarity(
-            wp_latents.unsqueeze(1).expand(-1, obs_latents.size(0), -1),
-            obs_latents.unsqueeze(0).expand(wp_latents.size(0), -1, -1),
-            dim=-1
+           wp_latents[:, None, :].expand(-1, obs_latents.size(0), -1),
+           obs_latents[None, :, :].expand(wp_latents.size(0), -1, -1),
+           dim=-1
     )
+
+    print("cossim shape:", cos_sims.shape)
+
+    assert cos_sims.shape[0] == intervals.shape[0]
 
     for i, cos_sim in enumerate(cos_sims):
         # signals must have at least 3 dims
-        cos_sim = cos_sim.unsqueeze(0).unsqueeze(0)
+        cos_sim = cos_sim[None, None, :]
 
         # generate inputs w/ base cases and recursive concatenation
         if len(inputs) == 0:
@@ -520,9 +748,10 @@ def compute_stl_loss(
 
         # TODO: formula created at training time, can change to reduce complexity
         # overloading notation, cos_sim is now an STL expression
+        # print("curr interval", intervals[i])
         cos_sim = stlcg.Eventually(
                 stlcg.Expression("phi_j", cos_sim) > THRESHOLD,
-                interval=[i, i + 1]
+                interval=[intervals[i][0], intervals[i][1]]
         )
 
         if outer_form is None:
@@ -543,6 +772,7 @@ def compute_stl_loss(
 
     # compute the robustness
     margin = 0.0
+    # print(inputs)
     robustness = (-outer_form.robustness(inputs)).squeeze() 
     stl_loss = F.leaky_relu(robustness - margin).mean()
 
