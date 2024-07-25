@@ -5,17 +5,6 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from torch import autocast
 
-import sys
-from typing import Tuple
-import os
-import warnings
-import time
-import gc
-import argparse
-from collections import namedtuple
-import heapq
-import shutil
-
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
@@ -23,12 +12,26 @@ import tqdm
 from PIL import Image
 import wandb
 
+import sys
+from typing import Tuple, Union
+import os
+import warnings
+import time
+import gc
+import argparse
+import heapq
+import shutil
+
+from viz_utils import *
+from text_utils import *
+
 # meant for MobileViT arch, be aware of real warnings
 warnings.filterwarnings("ignore")
 
 from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator
 from vit_pytorch.mobile_vit import MobileViT
 from diffusers import StableDiffusionPipeline
+# from transformers import CLIPTokenizer
 from huggingface_hub import login
 
 sys.path.insert(0, "visualnav-transformer/train")
@@ -45,77 +48,32 @@ from network import modeling
 
 """
 TODO
-- handle multiple prompts with stable diffusion
-- return intervals for each waypoint, if it sees ground ignore it
-- sort out memory issues
+- negative prompts/STL examples
+
+- check wandb list saved
+- see if obs vision encoder tokens can be inputted
+- explore SDF w/ text-to-depth images
+
 - clean up code (comment, delete unnecessary snippets, ...) 
 - get sacson to work again
 - remove process_data + vint_train dirs
 
 COMPLETED
-- added no grads to inference
-- added deeplabv3
-- added stable diffusion
+- testing intervals that reset every batch...
+- object persistence
+- added no grads to inference, sorted out memory issues
 """
 
-
-# print(os.getenv("HUGGINGFACE_HUB_TOKEN"))
 login(os.getenv("HUGGINGFACE_HUB_TOKEN"))
-
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:21000"
-
-# for visualization class color mappings
-CityscapesClass = namedtuple('CityscapesClass', ['name', 'id', 'train_id', 'category', 'category_id',
-                                                     'has_instances', 'ignore_in_eval', 'color'])
-classes = [
-    CityscapesClass('unlabeled',            0, 255, 'void', 0, False, True, (0, 0, 0)),
-    CityscapesClass('ego vehicle',          1, 255, 'void', 0, False, True, (0, 0, 0)),
-    CityscapesClass('rectification border', 2, 255, 'void', 0, False, True, (0, 0, 0)),
-    CityscapesClass('out of roi',           3, 255, 'void', 0, False, True, (0, 0, 0)),
-    CityscapesClass('static',               4, 255, 'void', 0, False, True, (0, 0, 0)),
-    CityscapesClass('dynamic',              5, 255, 'void', 0, False, True, (111, 74, 0)),
-    CityscapesClass('ground',               6, 255, 'void', 0, False, True, (81, 0, 81)),
-    CityscapesClass('road',                 7, 0, 'flat', 1, False, False, (128, 64, 128)),
-    CityscapesClass('sidewalk',             8, 1, 'flat', 1, False, False, (244, 35, 232)),
-    CityscapesClass('parking',              9, 255, 'flat', 1, False, True, (250, 170, 160)),
-    CityscapesClass('rail track',           10, 255, 'flat', 1, False, True, (230, 150, 140)),
-    CityscapesClass('building',             11, 2, 'construction', 2, False, False, (70, 70, 70)),
-    CityscapesClass('wall',                 12, 3, 'construction', 2, False, False, (102, 102, 156)),
-    CityscapesClass('fence',                13, 4, 'construction', 2, False, False, (190, 153, 153)),
-    CityscapesClass('guard rail',           14, 255, 'construction', 2, False, True, (180, 165, 180)),
-    CityscapesClass('bridge',               15, 255, 'construction', 2, False, True, (150, 100, 100)),
-    CityscapesClass('tunnel',               16, 255, 'construction', 2, False, True, (150, 120, 90)),
-    CityscapesClass('pole',                 17, 5, 'object', 3, False, False, (153, 153, 153)),
-    CityscapesClass('polegroup',            18, 255, 'object', 3, False, True, (153, 153, 153)),
-    CityscapesClass('traffic light',        19, 6, 'object', 3, False, False, (250, 170, 30)),
-    CityscapesClass('traffic sign',         20, 7, 'object', 3, False, False, (220, 220, 0)),
-    CityscapesClass('vegetation',           21, 8, 'nature', 4, False, False, (107, 142, 35)),
-    CityscapesClass('terrain',              22, 9, 'nature', 4, False, False, (152, 251, 152)),
-    CityscapesClass('sky',                  23, 10, 'sky', 5, False, False, (70, 130, 180)),
-    CityscapesClass('person',               24, 11, 'human', 6, True, False, (220, 20, 60)),
-    CityscapesClass('rider',                25, 12, 'human', 6, True, False, (255, 0, 0)),
-    CityscapesClass('car',                  26, 13, 'vehicle', 7, True, False, (0, 0, 142)),
-    CityscapesClass('truck',                27, 14, 'vehicle', 7, True, False, (0, 0, 70)),
-    CityscapesClass('bus',                  28, 15, 'vehicle', 7, True, False, (0, 60, 100)),
-    CityscapesClass('caravan',              29, 255, 'vehicle', 7, True, True, (0, 0, 90)),
-    CityscapesClass('trailer',              30, 255, 'vehicle', 7, True, True, (0, 0, 110)),
-    CityscapesClass('train',                31, 16, 'vehicle', 7, True, False, (0, 80, 100)),
-    CityscapesClass('motorcycle',           32, 17, 'vehicle', 7, True, False, (0, 0, 230)),
-    CityscapesClass('bicycle',              33, 18, 'vehicle', 7, True, False, (119, 11, 32)),
-    CityscapesClass('license plate',        -1, 255, 'vehicle', 7, False, True, (0, 0, 142)),
-]
-
-train_id_to_color = [c.color for c in classes if (c.train_id != -1 and c.train_id != 255)]
-train_id_to_color.append([0, 0, 0])
-train_id_to_color = np.array(train_id_to_color)
-
-train_id_to_name = [c.name for c in classes if (c.train_id != -1 and c.train_id != 255)]
-train_id_to_name = np.array(train_id_to_name)
 
 
 def load_models(device: torch.device): 
     """
     Loads the pre-trained ViT models onto the specified device.
+
+    Args:
+        device: if GPU not available, use CPU.
     """
     weights_dir = os.path.join(os.getcwd(), "pretrained_weights")
 
@@ -154,242 +112,127 @@ def load_models(device: torch.device):
     )
     #.to(device)
 
-    # text-to-image model
+    # text-to-image models
+    # token_model = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
     pipe = StableDiffusionPipeline.from_pretrained(
             "CompVis/stable-diffusion-v1-4",
             cache_dir=os.path.join(weights_dir, "stable_diffusion"),
             use_auth_token=True,
     )
-
+    
     return deeplab.to(device), mb_vit.to(device), pipe.to(device)
     # return seg_model, mb_vit
     # return mb_vit
 
 
-def generate_masks(viz_obs: torch.Tensor, model) -> dict:
-    viz_obs = np.moveaxis(to_numpy(viz_obs), 0, -1)
-    viz_obs = (viz_obs * 255.).astype("uint8")
-    return model.generate(viz_obs)
-
-
-def mask_to_img(masks: dict) -> np.ndarray:
-    """
-    Converts a binary mask to a randomized-color RGB image.
-    """
-    
-    sorted_anns = sorted(masks, key=(lambda x: x['area']), reverse=True)
-    mask_img = np.ones((masks[0]['segmentation'].shape[0], masks[0]['segmentation'].shape[1], 3))
-    for ann in sorted_anns:
-        m = ann['segmentation']
-        mask_img[m] = np.random.random(3)
-   
-    mask_img = cv2.resize(mask_img, (256, 256))  # TODO: for ViT, it will be distorted
-    mask_img = np.resize(mask_img, (mask_img.shape[-1], mask_img.shape[0], mask_img.shape[1]))
-
-    mask_img = torch.from_numpy(mask_img).unsqueeze(0)
-    mask_img = mask_img.to(torch.float32)  # type incompatibility otherwise
-
-    #print("mask img shape ===", mask_img.shape)
-
-    return mask_img  # Mobile-ViT only takes scalar doubles
-
-
+@torch.no_grad()
 def generate_latents_from_obs(
     obs_imgs: torch.Tensor,
-    seg_model,
-    enc_model: MobileViT,
-    gen_model,
+    models: tuple,
     gen_subgoal: bool,
     device: torch.device,
-    data_pos: int = 0,  # TODO: fix this
+    data_pos: int = 0,
     visualize: bool = False,
-) -> torch.Tensor:
+) -> Union[Tuple, torch.Tensor]:
     """
     Generates latents from the observation needed for STL.
 
     Args:
         obs_imgs: observation images shaped 96x96.
-        seg_model: semantic segmentation model, DeepLabV3.
-        enc_model: encoder model for latent embeddings, MobileViT.
-        gen_model: text-to-image model, StableDiffusion.
+        models: semantic segmentation, encoder, and text-to-image generators.
         device: the device to move tensors onto during inference.
-        gen_subgoal: differentiates training/pre-training processes.
+        gen_subgoal: specifies pre-training or training process.
         data_pos: position in the dataset loop for calculating intervals.
         visualize: visualize obs segmentation images with WandB.
 
     Returns:
-        z_batch: waypoint latents + STL intervals for the current batch.
+        `tuple` or torch.Tensor:
+            If gen_subgoal is true, z_batch with intervals will be returned,
+            otherwise a `tuple` is returned with no interval array.
     """
-
-    def landmark_criteria(preds_unique: np.ndarray, n: int = 7) -> bool:
-        """
-        Images must have the correct object landmarks, have enough pixel
-        predictions, and have enough landmarks.
-
-        TODO: counts, object persistence
-
-        for now, the number is equal to 7. one one hand, we want to create
-        descriptive prompts for StableDiffusion, but on the other, we want to
-        find one major landmark.
-        we have static landmarks for now.
-        relative frequency shouldn't work. counts make more sense.
-        """
-        # object_landmarks = [2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16, 17, 18]
-        # object_landmarks = np.array([2, 3, 4, 5, 6, 7])
-        object_landmarks = np.array([2, 6, 7, 18])
-       
-        in_landmarks = np.intersect1d(preds_unique, object_landmarks, assume_unique=True)
-
-        # skip if none of the conditions satisfy
-        #return len(preds_unique) <= n and \
-               #len(in_landmarks) != 0
-        return len(in_landmarks) != 0
+    # load in all models
+    seg_model, enc_model, gen_model = models
 
     enc_img_size = (256, 256)  # for MobileViT inputs
-    intervals = []
-    n = 3  # for filter criteria
 
     if torch.cuda.is_available():
         obs_imgs = obs_imgs.to(device)
 
     if gen_subgoal:
-        with torch.no_grad():
-            outputs = seg_model(obs_imgs)
+        # with torch.no_grad():
+        outputs = seg_model(obs_imgs)
+        preds, intervals = filter_preds(outputs, data_pos)
 
-        # return the max probability for each image
-        preds = outputs.max(1)[1].detach().cpu().numpy()
-        preds[preds == 255] = 19
-        # format of image doesn't matter, flatten
-        preds = preds.reshape(preds.shape[0], -1)
+        print(f"PREDS SHAPE {len(preds)}, INTERVALS SHAPE {intervals.shape}")
 
-        assert(preds.shape == (256, 96 ** 2))
+        # ====================== MODEL OUTPUTS ===============
+        # input_ids = gen_model.tokenizer(preds,
+        #         padding=True,
+        #         return_tensors="pt"
+        # ).input_ids.to(device)
 
-        preds_comb = [np.unique(p, return_counts=True)
-                for p in preds]
-        # preds_comb = [(set(p), count) for (p, count) in preds_comb]
-
-        # filter out predictions
-        preds = []
-        # object_landmarks = set([i for i in range(19)]) - {0, 1, 8, 9, 10}
-        
-        # retrieve n-top unique classes
-        for i, (preds_unique, counts) in enumerate(preds_comb):
-            # if there aren't enough landmarks or not an object landmark, skip
-            if not landmark_criteria(preds_unique, n):
-                continue
-            
-            # don't do unnecessary computation if not necessary
-            # if preds_unique.shape[0] < n:
-            top_idx = np.arange(len(preds_unique))
-            #else: 
-            # top_idx = np.argpartition(preds_unique, -n)[-n:]
-            # top_idx = heapq.nlargest(n, preds_unique)
-            n_top = preds_unique[top_idx]
-
-            preds.append(n_top)
-            intervals.append([data_pos + i, data_pos + i + 1])
-
-        del preds_comb
-        gc.collect()
-
-        intervals = np.array(intervals)
-        print("INTERVAL SHAPE", intervals.shape)
-
-        # print(preds_flat.shape)
-
-        # preds_combined = [np.unique(p, return_counts=True) for p in preds_flat]
-
-        # preds_unique = preds_combined[:, 0]
-        # counts = preds_combined[:, 1]
-        
-        # print(counts)
-
-        # freq_idx = np.argmax(counts)
-        # pred_id = preds_unique[freq_idx]
-
-        # convert to class labels based on indices
-        preds = [train_id_to_name[p] for p in preds]
-        print(len(preds))
-        
-        preds = [" and ".join(preds[i].reshape(-1)) \
-                for i in range(len(preds))
-        ]
-
-        print("PROMPTS", preds[0:4])
+        # text_embeddings = gen_model.text_encoder(input_ids).last_hidden_state
+        # size = gen_model.unet.sample_size
+        # latents = torch.randn((text_embeddings.shape[0], gen_model.unet.in_channels, size, size)).to(device)
+        # print(text_embeddings.shape)
+        # print(latents.shape)
+        # num_steps = 50
+        # for t in range(num_steps):
+        #     timesteps = torch.tensor([num_steps - t - 1], dtype=torch.long).to(device)
+        #     # timesteps = timesteps.expand(228, -1)
+        #
+        #     with autocast("cuda"):
+        #         print(gen_model.unet.sample_size)
+        #         noise_pred = gen_model.unet(latents, timesteps, encoder_hidden_states=text_embeddings).sample
+        #
+        #     latents -= noise_pred * gen_model.scheduler.sigmas[t]
 
         subgoal_imgs = []
         dis_imgs = []
-        #height = 128
-        #width = 128
+        step_size = 3
+        # limit = 10
+        for i in range(0, len(preds), step_size):
+            # if i == limit:
+            #     break
+            output_imgs = gen_model(preds[i: i + 3]).images
+            output_imgs = [TF.pil_to_tensor(img) for img in output_imgs]
+            output_imgs = [TF.resize(img, enc_img_size) for img in output_imgs]
 
-        with torch.no_grad():
-            with autocast("cuda"):
-                # TODO: TEMP add full prompts, filter more
-                limit = 10
-                for i in range(len(preds)):
-                    if i == limit:
-                        break
-                    output_img = gen_model(preds[i]).images[0]
-                    output_img = TF.pil_to_tensor(output_img)
-                    # output_img = TF.resize(output_img, enc_img_size)
-                    subgoal_imgs.append(output_img)
+            # print(f"shape of output_imgs: {len(output_imgs)}")
 
-                    save_path = f"subgoal_{i}.png"
-                    plt.imshow(np.moveaxis(to_numpy(output_img), 0, -1))
-                    plt.savefig(save_path)
-                    dis_imgs.append(wandb.Image(save_path))
-                  
-                print("LOGGED!")
-                wandb.log({"ex": dis_imgs}, commit=False)
-                raise Exception("test")
+            fig, ax = plt.subplots(step_size)
+            save_path = f"subgoal_{i}.png"
+            for j in range(len(output_imgs)):
+                ax[j].imshow(np.moveaxis(to_numpy(output_imgs[j]), 0, -1))
+            plt.savefig(save_path)
+            dis_imgs.append(wandb.Image(save_path))
 
-                intervals = intervals[:limit]
-                    
+            # output_img = TF.pil_to_tensor(output_imgs[0])
+            # output_img = TF.resize(output_img, enc_img_size)
+            subgoal_imgs.extend(output_imgs)
+        # intervals = intervals[:limit]
+
         # nothing else is needed except the images and intervals
         del preds
         gc.collect()
         torch.cuda.empty_cache()
 
+        print("LOGGED!")
+        wandb.log({"ex": dis_imgs}, commit=False)
+        # raise Exception("test")
+
         subgoal_imgs = torch.stack(subgoal_imgs).float().to(device)
         print(subgoal_imgs.shape)
-        with torch.no_grad():
-            z_batch = (enc_model(subgoal_imgs), intervals)
+        # with torch.no_grad():
+        z_batch = (enc_model(subgoal_imgs), intervals)
 
         del subgoal_imgs
+        del intervals
         gc.collect()
         torch.cuda.empty_cache()
 
-        if visualize:
-            dis_imgs = []
-            for i in range(len(preds)):
-                colorized_preds = train_id_to_color[preds].astype("uint8")
-                # print(colorized_preds.shape)  # (256, 256, 256, 3), which is expected
-                colorized_preds = Image.fromarray(colorized_preds[i])
-
-                # # visualize output mask classes
-                # palette = torch.tensor([2 ** 25 - 1, 2 ** 15 - 1, 2 ** 21 - 1])
-                # colors = torch.as_tensor([i for i in range(21)])[:, None] * palette
-                # colors = (colors % 255).numpy().astype("uint8")
-
-                # r = Image.fromarray(output_predictions.byte().cpu().numpy()).resize((160, 120))
-                # r.putpalette(colors)
-
-                # plt.imshow(r)
-
-                mask_dir = f"mask_img_{i}.png"
-                plt.imshow(colorized_preds)
-                plt.savefig(mask_dir)
-                dis_imgs.append(wandb.Image(mask_dir))
-
-                obs_dir = f"obs_img_{i}.png"
-                plt.imshow(np.moveaxis(obs_imgs[i].cpu().numpy(), 0, -1))
-                plt.savefig(obs_dir)
-                dis_imgs.append(wandb.Image(obs_dir))
-                
-                # requires an error or complete successful run
-                if i == 9:
-                    break
-            wandb.log({"ex2": dis_imgs}, commit=False)
+        # if visualize:
+        #     visualize_segmentation(obs_imgs, preds)  # return an extra un-normalized pred to visualize
 
         return z_batch
     else:
@@ -398,15 +241,14 @@ def generate_latents_from_obs(
 
         obs_imgs = TF.resize(obs_imgs, enc_img_size)
         # no gradient accumulation works wonders
-        with torch.no_grad():
-            z_batch = (enc_model(obs_imgs), intervals)
+        # with torch.no_grad():
+        z_t = enc_model(obs_imgs)
 
         del obs_imgs
         gc.collect()
         torch.cuda.empty_cache()
 
-        return z_batch 
-      
+        return z_t
 
     # # generate masks
     # obs_imgs = np.moveaxis(to_numpy(obs_imgs), 1, -1)
@@ -429,16 +271,12 @@ def generate_latents_from_obs(
     # z_t = mb_vit(obs_imgs.to(device))
     # z_t = mb_vit(obs_imgs)
 
-    return z_batch
-
 
 def generate_waypoints(
-    dataset: DataLoader, 
-    seg_model,
-    enc_model: MobileViT,
-    gen_model,
+    dataset: DataLoader,
+    models: tuple,
     device: torch.device,
-    load_waypoints: bool = False,
+    load_waypoints: bool = True,
     visualize: bool = False,
 ) -> torch.Tensor:
     """
@@ -483,9 +321,7 @@ def generate_waypoints(
     # if the folder has no files, generate new latents
     if not load_waypoints:  # TODO: change to automate
         for idx, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
-            # TODO: try utilizing GPU memory
-            #gc.collect()
-            #torch.cuda.empty_cache()
+            start_time = time.time()
 
             obs_img, _, _, _, _, _, _ = data
 
@@ -504,12 +340,11 @@ def generate_waypoints(
             # convert the resized batch into latent vectors
             z_batch = generate_latents_from_obs(
                     obs_imgs=obs_imgs,
-                    seg_model=seg_model,
-                    enc_model=enc_model,
-                    gen_model=gen_model,
+                    models=models,
                     gen_subgoal=True,
                     device=device,
-                    data_pos=batch_size * idx,
+                    # data_pos=batch_size * idx,
+                    data_pos=0,  # TODO: TEMP================
                     visualize=False,
             )
             print(f"shape of the stack: {z_batch[0].shape}, {z_batch[1].shape}")
@@ -529,6 +364,10 @@ def generate_waypoints(
                     wandb_images.append(wandb.Image(save_path))
                     wandb.log({"ex": wandb_images}, commit=False)
 
+            torch.save(z_batch, latent_file + f"_{idx}")
+
+            print("ELAPSED TIME: %.2f s." % (time.time() - start_time))
+
             # TODO: implement goal images
             # viz_goal_img = TF.resize(goal_img, VISUALIZATION_IMAGE_SIZE[::-1])
 
@@ -538,7 +377,6 @@ def generate_waypoints(
             # else:
             #     z_stacked = torch.cat((z_stacked, z_w), dim=0)
 
-            torch.save(z_batch, latent_file + f"_{idx}")
             # # TODO: temporary stop point
             # if z_batch[0].size(0) > 2000:
             #     break
@@ -600,9 +438,7 @@ def compute_stl_loss(
     wp_latents: torch.Tensor, 
     device: torch.device,
     # formula: stlcg.STL_Formula,
-    seg_model,
-    enc_model: MobileViT,
-    gen_model=None,
+    models: tuple,
     visualize: bool = False,
 ) -> torch.Tensor:
     """
@@ -612,13 +448,10 @@ def compute_stl_loss(
     start_time = time.time()
 
     # don't need intervals for observation latents
-    obs_latents, _ = generate_latents_from_obs(
+    obs_latents = generate_latents_from_obs(
             obs_imgs=obs_imgs,
-            seg_model=seg_model,
-            enc_model=enc_model,
-            gen_model=gen_model,
+            models=models,
             device=device,
-            data_pos=None,
             gen_subgoal=False,
     )
 
@@ -631,12 +464,12 @@ def compute_stl_loss(
     outer_form = None
 
     # indicates the sensitivity of satisfaction for cosine distance
-    THRESHOLD = 0.9
+    THRESHOLD = 0.5
 
     # signal inputs to the robustness function
     inputs = ()
 
-    # Method 1: O(nm) time    
+    # Method 1: O(nm) time
 
     # print(wp_latents.shape, obs_latents.shape)
 
@@ -730,6 +563,8 @@ def compute_stl_loss(
            dim=-1
     )
 
+    print(cos_sims)
+
     print("cossim shape:", cos_sims.shape)
 
     assert cos_sims.shape[0] == intervals.shape[0]
@@ -738,7 +573,7 @@ def compute_stl_loss(
         # signals must have at least 3 dims
         cos_sim = cos_sim[None, None, :]
 
-        # generate inputs w/ base cases and recursive concatenation
+        # generate inputs w/ recursive concatenation
         if len(inputs) == 0:
             inputs = (cos_sim,)
         elif len(inputs) == 1:
@@ -779,231 +614,3 @@ def compute_stl_loss(
     print(f"STL loss: {stl_loss}, \tTime (s): {time.time() - start_time}")
     
     return stl_loss
-
-
-def visualize_sam_maps(
-    viz_obs: torch.Tensor,
-    viz_goal: torch.Tensor,
-    obs_map: dict,
-    goal_map: dict,
-    viz_freq: int = 10,
-):
-    def show_anns(anns, ax):
-        if len(anns) == 0:
-            return
-
-        sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
-        ax.set_autoscale_on(True)
-
-        img = np.ones((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 4))
-        img[:,:,3] = 0
-        for ann in sorted_anns:
-            m = ann['segmentation']
-            color_mask = np.concatenate([np.random.random(3), [0.35]])
-            img[m] = color_mask
-        ax.imshow(img)
-
-    wandb_list = []
-
-    for i, (obs, goal) in enumerate(zip(batch_viz_obs_images, batch_viz_goal_images)):
-        if i % viz_freq == 0:
-            fig, ax = plt.subplots(1, 4)
-
-            obs_img = np.moveaxis(to_numpy(obs), 0, -1)
-            goal_img = np.moveaxis(to_numpy(goal), 0, -1)
-
-            obs_img = (obs_img * 255.).astype('uint8')
-            goal_img = (goal_img * 255.).astype('uint8')
-
-            ax[0].imshow(obs_img)
-            ax[1].imshow(goal_img)
-            
-            #save_path = os.path.join(visualize_path, 'original.png')
-            #plt.savefig(save_path)
-            #wandb_list.append(wandb.Image(save_path))
-            #wandb.log({'examples': wandb_list}, commit=False)
-
-            # generate masks
-            # obs_map = mask_generator.generate(obs_img)
-            # goal_map = mask_generator.generate(goal_img)
-
-            #ax[2].imshow(obs_map['segmentation'])
-            #ax[3].imshow(goal_map['segmentation'])
-
-            #show_anns(obs_map, ax[0])
-            #show_anns(goal_map, ax[1])
-            
-            show_anns(obs_map, ax[2])
-            show_anns(goal_map, ax[3])
-
-            ax[0].set_title('Observation')
-            ax[1].set_title('Goal')
-            ax[2].set_title('Obs Map')
-            ax[3].set_title('Goal Map')
-
-            for a in ax.flatten():
-                a.axis('off')
-
-            visualize_path = "examples"
-            map_save_path = os.path.join(visualize_path, f'maps_{i}.png')
-            plt.savefig(map_save_path)
-
-            wandb_list.append(wandb.Image(map_save_path))
-
-            wandb.log({'examples': wandb_list}, commit=False)
-
-            print(f"Finished generating masks for maps_{i}.png.")
-
-
-# IOU conversion 
-#map_ious = [obs["predicted_iou"] for obs in obs_map]
-#avg_iou = sum(map_ious) / len(map_ious)
-
-#o = stlcg.Expression('obs', obs)
-#g = stlcg.Expression('g', goal)
-
-#intersection = (obs & goal).float().sum((1, 2)) + 1e-6
-#union = (obs | goal).float().sum(i(1, 2)) + 1e-6
-#iou = intersection / union
-#iou = avg_iou * 2. - 1.  # without normalization set to >.5 
-
-
-"""class STLViz:
-    def __init__(
-        self,
-        unshuffled_dataset: torch.utils.data.DataLoader
-    ):
-        self.formula = self.generate_waypoints(unshuffled_dataset)
-    
-        # specify ViT mask generators 
-        weight_path = os.path.join(os.getcwd(), "pre_trained_weights/weights/weight/sam_vit_h_4b8939.pth")
-        model_type = 'vit_h'
-        mobile_sam = sam_model_registry[model_type](checkpoint=weight_path).to(device=device).eval()
-        self.mask_generator = SamAutomaticMaskGenerator(mobile_sam)
-
-        # specify ViT image encoder
-        mbvit_xs = MobileViT(
-                image_size=mbvit_config['image_size'],
-                dims=mbvit_config['dims'],
-                channel=mbvit_config['channel'],
-                num_classes=mbvit_config['num_classes'],
-        )
-
-    def generate_masks(obs_img: torch.Tensor):
-        return self.mask_generator.generate(obs_img)
-
-    def generate_waypoints(self, dataset) -> stlcg.STL_Formula:
-        for i, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
-            obs_img, goal_img, _, _, _, _, _ = data
-
-            obs_imgs = torch.split(obs_img, 3, dim=1)
-            viz_obs_img = TF.resize(obs_imgs[-1], VISUALIZATION_IMAGE_SIZE[::-1])
-
-            #map_ious = [obs["predicted_iou"] for obs in obs_map]
-            #avg_iou = sum(map_ious) / len(map_ious)
-
-            #o = stlcg.Expression('obs', obs)
-            #g = stlcg.Expression('g', goal)
-
-            #intersection = (obs & goal).float().sum((1, 2)) + 1e-6
-            #union = (obs | goal).float().sum(i(1, 2)) + 1e-6
-            #iou = intersection / union
-            #iou = avg_iou * 2. - 1.  # without normalization set to >.5
-
-            #return stlcg.Always(stlcg.Expression('iou', iou))
-
-
-
-    def compute_stl_loss(self, viz_obs: torch.Tensor) -> dict, torch.Tensor:
-        stl_loss = 0
-
-        for i, obs in enumerate(viz_obs):
-            obs = np.moveaxis(obs, 0, -1)
-            obs = (obs * 255.).astype("uint8")
-            obs_map = self.mask_generator(obs)
-
-            margin = 0.05
-
-            # STL loss
-            if self.formula is None:
-                raise ValueError(f"Formula is not properly defined: {self.formula}")
-
-            robustness = (-self.formula.robustness(obs_map)).squeeze() 
-            stl_loss += F.leaky_relu(robustness - margin).mean()
-        
-        return stl_loss / viz_obs.shape[0]  # TODO: check if this is right
-
-    @staticmethod
-    def visualize_sam_maps(
-        viz_obs: torch.Tensor,
-        viz_goal: torch.Tensor,
-        obs_map: dict,
-        goal_map: dict,
-        viz_freq: int = 10,
-    ):
-
-        def show_anns(anns, ax):
-            if len(anns) == 0:
-                return
-
-            sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
-            ax.set_autoscale_on(True)
-
-            img = np.ones((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 4))
-            img[:,:,3] = 0
-            for ann in sorted_anns:
-                m = ann['segmentation']
-                color_mask = np.concatenate([np.random.random(3), [0.35]])
-                img[m] = color_mask
-            ax.imshow(img)
-
-        wandb_list = []
-
-        for i, (obs, goal) in enumerate(zip(batch_viz_obs_images, batch_viz_goal_images)):
-            if i % viz_freq == 0:
-                fig, ax = plt.subplots(1, 4)
-
-                obs_img = np.moveaxis(to_numpy(obs), 0, -1)
-                goal_img = np.moveaxis(to_numpy(goal), 0, -1)
-
-                obs_img = (obs_img * 255.).astype('uint8')
-                goal_img = (goal_img * 255.).astype('uint8')
-
-                ax[0].imshow(obs_img)
-                ax[1].imshow(goal_img)
-                
-                #save_path = os.path.join(visualize_path, 'original.png')
-                #plt.savefig(save_path)
-                #wandb_list.append(wandb.Image(save_path))
-                #wandb.log({'examples': wandb_list}, commit=False)
-
-                # generate masks
-                # obs_map = mask_generator.generate(obs_img)
-                # goal_map = mask_generator.generate(goal_img)
-
-                #ax[2].imshow(obs_map['segmentation'])
-                #ax[3].imshow(goal_map['segmentation'])
-
-                #show_anns(obs_map, ax[0])
-                #show_anns(goal_map, ax[1])
-                
-                show_anns(obs_map, ax[2])
-                show_anns(goal_map, ax[3])
-
-                ax[0].set_title('Observation')
-                ax[1].set_title('Goal')
-                ax[2].set_title('Obs Map')
-                ax[3].set_title('Goal Map')
-
-                for a in ax.flatten():
-                    a.axis('off')
-
-                map_save_path = os.path.join(visualize_path, f'maps_{i}.png')
-                plt.savefig(map_save_path)
-
-                wandb_list.append(wandb.Image(map_save_path))
-
-                wandb.log({'examples': wandb_list}, commit=False)
-
-                print(f"Finished generating masks for maps_{i}.png.")
-"""
