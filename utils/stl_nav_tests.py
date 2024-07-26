@@ -1,7 +1,7 @@
 import sys
 sys.path.insert(0, 'stlcg/src')  # disambiguate path names
 sys.path.insert(0, 'visualnav-transformer/train')
-print(sys.path)
+# print(sys.path)
 
 import stlcg
 import stlviz as viz

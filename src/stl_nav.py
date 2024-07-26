@@ -3,6 +3,8 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from torchvision import transforms
 from torch.utils.data import DataLoader
+# from torch.nn.parallel import DistributedDataParallel as DDP
+# import torch.distributed as dist
 from torch import autocast
 
 import numpy as np
@@ -29,9 +31,9 @@ from text_utils import *
 warnings.filterwarnings("ignore")
 
 from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator
-from vit_pytorch.mobile_vit import MobileViT
+# from vit_pytorch.mobile_vit import MobileViT
 from diffusers import StableDiffusionPipeline
-# from transformers import CLIPTokenizer
+from transformers import MobileViTModel
 from huggingface_hub import login
 
 sys.path.insert(0, "visualnav-transformer/train")
@@ -48,18 +50,19 @@ from network import modeling
 
 """
 TODO
+- solve memory issues
 - negative prompts/STL examples
 
-- check wandb list saved
+- visual SLAM, read some papers
+- explore SDF w/ image-to-depth images
+- NeRFs w/ STL?
+- manifold learning w/ latent embeddings neural network
 - see if obs vision encoder tokens can be inputted
-- explore SDF w/ text-to-depth images
 
 - clean up code (comment, delete unnecessary snippets, ...) 
-- get sacson to work again
-- remove process_data + vint_train dirs
 
 COMPLETED
-- testing intervals that reset every batch...
+- testing intervals that reset every batch..., until STL operator
 - object persistence
 - added no grads to inference, sorted out memory issues
 """
@@ -83,17 +86,17 @@ def load_models(device: torch.device):
             "deeplab/best_deeplabv3plus_resnet101_cityscapes_os16.pth.tar"
     )
 
-    mbvit_config = {
-        'image_size': (256, 256),
-        'dims': [96, 120, 144],
-        'channels': [16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 384],
-        #'channels': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], 
-        'num_classes': 1000,
-    }
+    # mbvit_config = {
+    #     'image_size': (256, 256),
+    #     'dims': [96, 120, 144],
+    #     'channels': [16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 384],
+    #     #'channels': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    #     'num_classes': 1000,
+    # }
 
     # semantic segmentation model
     # deep_lab = torch.hub.load("pytorch/vision:v0.10.0", "deeplabv3_resnet50", pretrained=True).eval()
-    deeplab = modeling.__dict__["deeplabv3plus_resnet101"](num_classes=19, output_stride=8)
+    deeplab = modeling.__dict__["deeplabv3plus_resnet101"](num_classes=19, output_stride=8).eval()
     deeplab.load_state_dict(torch.load(deeplab_dir)["model_state"])
 
     # test: non-semantic segmentation model
@@ -104,22 +107,31 @@ def load_models(device: torch.device):
     # seg_model = SamAutomaticMaskGenerator(model_class)
 
     # image encoder
-    mb_vit = MobileViT(
-            image_size=mbvit_config['image_size'],
-            dims=mbvit_config['dims'],
-            channels=mbvit_config['channels'],
-            num_classes=mbvit_config['num_classes'],
-    )
-    #.to(device)
+    # mb_vit = MobileViT(
+    #         image_size=mbvit_config['image_size'],
+    #         dims=mbvit_config['dims'],
+    #         channels=mbvit_config['channels'],
+    #         num_classes=mbvit_config['num_classes'],
+    # )
+
+    mb_vit = MobileViTModel.from_pretrained(
+        "apple/mobilevit-small",
+        cache_dir=os.path.join(weights_dir, "stable_diffusion"),
+        use_auth_token=True).eval()
 
     # text-to-image models
     # token_model = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
     pipe = StableDiffusionPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4",
+            "CompVis/stable-diffusion-v1-1",
             cache_dir=os.path.join(weights_dir, "stable_diffusion"),
             use_auth_token=True,
     )
-    
+
+    # deeplab = DDP(deeplab, device_ids=["cuda:0", "cuda:1", "cuda:2"])
+    # mb_vit = DDP(mb_vit, device_ids=["cuda:0", "cuda:1", "cuda:2"])
+    # pipe = DDP(pipe, device_ids=["cuda:0", "cuda:1", "cuda:2"])
+
+    # return deeplab, mb_vit, pipe
     return deeplab.to(device), mb_vit.to(device), pipe.to(device)
     # return seg_model, mb_vit
     # return mb_vit
@@ -133,6 +145,7 @@ def generate_latents_from_obs(
     device: torch.device,
     data_pos: int = 0,
     visualize: bool = False,
+    create_intervals: bool = False,
 ) -> Union[Tuple, torch.Tensor]:
     """
     Generates latents from the observation needed for STL.
@@ -147,23 +160,46 @@ def generate_latents_from_obs(
 
     Returns:
         `tuple` or torch.Tensor:
-            If gen_subgoal is true, z_batch with intervals will be returned,
-            otherwise a `tuple` is returned with no interval array.
+            If create_intervals is false, z_batch without intervals will be returned,
+            otherwise a `tuple` is returned with an intervals array.
     """
     # load in all models
     seg_model, enc_model, gen_model = models
-
     enc_img_size = (256, 256)  # for MobileViT inputs
 
     if torch.cuda.is_available():
         obs_imgs = obs_imgs.to(device)
 
+    # print("BEFORE MODEL INFERENCE\n", torch.cuda.memory_summary())
+
+    # for MobileViT inputs
+    preprocess = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Resize((256, 256)),
+    ])
+
     if gen_subgoal:
-        # with torch.no_grad():
-        outputs = seg_model(obs_imgs)
+        with torch.no_grad():
+            outputs = seg_model(obs_imgs)
+
+        # del obs_imgs
+        # flush()
+
+        # print("AFTER SEG MODEL INFERENCE\n", torch.cuda.memory_summary())
+
         preds, intervals = filter_preds(outputs, data_pos)
 
-        print(f"PREDS SHAPE {len(preds)}, INTERVALS SHAPE {intervals.shape}")
+        # del outputs
+        # flush()
+
+        # print(f"PREDS SHAPE {len(preds)}, INTERVALS SHAPE {intervals.shape}")
+
+        # we cannot continue process if there are no valid waypoints
+        if len(preds) == 0:
+            print("Found no predictions, skipping...")
+            return
+
+        # print("AFTER FILTER PRED\n", torch.cuda.memory_summary())
 
         # ====================== MODEL OUTPUTS ===============
         # input_ids = gen_model.tokenizer(preds,
@@ -188,65 +224,87 @@ def generate_latents_from_obs(
         #     latents -= noise_pred * gen_model.scheduler.sigmas[t]
 
         subgoal_imgs = []
-        dis_imgs = []
+        # # for visualization
+        # dis_imgs = []
         step_size = 3
         # limit = 10
         for i in range(0, len(preds), step_size):
             # if i == limit:
             #     break
-            output_imgs = gen_model(preds[i: i + 3]).images
-            output_imgs = [TF.pil_to_tensor(img) for img in output_imgs]
-            output_imgs = [TF.resize(img, enc_img_size) for img in output_imgs]
+            # print("BEFORE STABLE DIFFUSION \n", torch.cuda.memory_summary())
 
-            # print(f"shape of output_imgs: {len(output_imgs)}")
+            with torch.no_grad():
+                output_imgs = gen_model(
+                    prompt=preds[i: i + 3],
+                    # num_images_per_prompt=1,
+                    # num_inference_steps=20,
+                    # height=enc_img_size[0],
+                    # width=enc_img_size[1],
+                    # guidance_scale=7.5,
+                    # eta=0.0,
+                ).images
 
-            fig, ax = plt.subplots(step_size)
-            save_path = f"subgoal_{i}.png"
-            for j in range(len(output_imgs)):
-                ax[j].imshow(np.moveaxis(to_numpy(output_imgs[j]), 0, -1))
-            plt.savefig(save_path)
-            dis_imgs.append(wandb.Image(save_path))
+            output_imgs = [preprocess(img) for img in output_imgs]
+            output_imgs = torch.stack(output_imgs)
 
-            # output_img = TF.pil_to_tensor(output_imgs[0])
-            # output_img = TF.resize(output_img, enc_img_size)
+            # 256x256x3
+            # print("output imgs size", [img.size() for img in output_imgs])  # Adjusted for PIL Image size
+
             subgoal_imgs.extend(output_imgs)
-        # intervals = intervals[:limit]
 
-        # nothing else is needed except the images and intervals
-        del preds
-        gc.collect()
-        torch.cuda.empty_cache()
+            # print('SUBGOAL SHAPE', len(subgoal_imgs))
+            # print("AFTER SUBGOAL \n", torch.cuda.memory_summary())
 
-        print("LOGGED!")
-        wandb.log({"ex": dis_imgs}, commit=False)
+            # fig, ax = plt.subplots(step_size)
+            # save_path = f"subgoal_{i}.png"
+            # for j in range(len(output_imgs)):
+            #     ax[j].imshow(np.moveaxis(to_numpy(output_imgs[j]), 0, -1))
+            # plt.savefig(save_path)
+            # plt.close(fig)
+            # dis_imgs.append(wandb.Image(save_path))
+            # print("AFTER PLOTTING \n", torch.cuda.memory_summary())
+
+            # del output_imgs
+            # flush()
+
+            # print("AFTER FREE OUTPUT IMAGES \n", torch.cuda.memory_summary())
+        # print("AFTER STABLE DIFFUSION INFERENCE \n", torch.cuda.memory_summary())
+
+        # print("LOGGED!")
+        # wandb.log({"ex": dis_imgs}, commit=False)
         # raise Exception("test")
 
-        subgoal_imgs = torch.stack(subgoal_imgs).float().to(device)
-        print(subgoal_imgs.shape)
-        # with torch.no_grad():
-        z_batch = (enc_model(subgoal_imgs), intervals)
+        subgoal_imgs = torch.stack(subgoal_imgs).to(device)
+        print("SUBGOAL IMGS", subgoal_imgs.shape)
 
-        del subgoal_imgs
-        del intervals
-        gc.collect()
-        torch.cuda.empty_cache()
+        with torch.no_grad():
+            z_batch = enc_model(subgoal_imgs).last_hidden_state
+            z_batch = z_batch.view(z_batch.size(0), -1)  # z_batch is contiguous
+            if create_intervals:
+                z_batch = (z_batch, intervals)
+
+        print("ENCODED LATENTS", z_batch[0].shape)  # only if there is an interval
+
+        # del subgoal_imgs, dis_imgs, intervals, preds, models, seg_model, enc_model, gen_model
+        # flush()
+        # print("AFTER FREEING EVERYTHING \n", torch.cuda.memory_summary())
 
         # if visualize:
         #     visualize_segmentation(obs_imgs, preds)  # return an extra un-normalized pred to visualize
 
         return z_batch
     else:
-        gc.collect()
-        torch.cuda.empty_cache()
+        flush()
 
         obs_imgs = TF.resize(obs_imgs, enc_img_size)
         # no gradient accumulation works wonders
-        # with torch.no_grad():
-        z_t = enc_model(obs_imgs)
+        with torch.no_grad():
+            z_t = enc_model(obs_imgs).last_hidden_state
+            z_t = z_t.view(z_t.size(0), -1)
 
+        print(f"ENCODED OBS: {z_t.shape}, DEVICE: {z_t.device}")
         del obs_imgs
-        gc.collect()
-        torch.cuda.empty_cache()
+        flush()
 
         return z_t
 
@@ -254,30 +312,14 @@ def generate_latents_from_obs(
     # obs_imgs = np.moveaxis(to_numpy(obs_imgs), 1, -1)
     # obs_imgs = (obs_imgs * 255.).astype("uint8")
 
-    # masks = seg_model.generate(obs_img)
-
-    # # preprocess mask images to be encoded
-    # mask_img = mask_to_img(masks)
-   
-    # # encode mask image
-    # # z_t = mb_vit(mask_img)
-
-    # print("shape before passing to vit", obs_imgs.shape)
-
-    # gc.collect()
-    # torch.cuda.empty_cache()
-
-    # the whole point is to process the images in parallel
-    # z_t = mb_vit(obs_imgs.to(device))
-    # z_t = mb_vit(obs_imgs)
-
 
 def generate_waypoints(
     dataset: DataLoader,
     models: tuple,
     device: torch.device,
-    load_waypoints: bool = True,
+    load_waypoints: bool = False,
     visualize: bool = False,
+    create_intervals: bool = False,
 ) -> torch.Tensor:
     """
     Generates latent waypoints from the full, unshuffled dataset.
@@ -294,25 +336,24 @@ def generate_waypoints(
     Returns:
         z_w: the full waypoint latents as a tensor.
     """
-    z_stacked = None
+    print(f"generate_waypoint() parameters \n " +
+          f"================\n" +
+          f"\tLoad waypoints: {load_waypoints}\n\tCreate intervals: {create_intervals}\n\tVisualize: {visualize}\n" +
+          f"\tNumber of GPUs available: {torch.cuda.device_count()}\n" +
+          f"================")
 
     # load last latent file if not already saved
     latent_dir = "latents"
-    latent_file = os.path.join(latent_dir, "last_saved_diffusion.pt")
+    latent_file = os.path.join(latent_dir, "last_saved_diffusion")
+
+    # TODO: TEMP, be aware of this line
+    # shutil.rmtree(latent_dir)
 
     # ensure directory is created
     if not os.path.isdir(latent_dir):
         os.makedirs(latent_dir)
 
-    # # TODO: TEMP
-    # shutil.rmtree(latent_dir)
-
     wandb_images = []
-    batch_size = 256  # for intervals
-
-    # TODO: test
-    #gc.collect()
-    #torch.cuda.empty_cache()
 
     preprocess = transforms.Compose([
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -321,6 +362,12 @@ def generate_waypoints(
     # if the folder has no files, generate new latents
     if not load_waypoints:  # TODO: change to automate
         for idx, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
+            # no need to overwrite the same files, skip if detected
+            latent_file_idx = latent_file + f"_{idx}.pt"
+            if os.path.isfile(latent_file_idx):
+                continue
+
+            # print("BEGINNING\n", torch.cuda.memory_summary())
             start_time = time.time()
 
             obs_img, _, _, _, _, _, _ = data
@@ -337,6 +384,8 @@ def generate_waypoints(
             obs_imgs = [preprocess(obs_img) for obs_img in obs_imgs]
             obs_imgs = torch.stack(obs_imgs)[-1]  # TODO: see if taking more images suffices
 
+            # print("AFTER OBSERVATION\n", torch.cuda.memory_summary())
+
             # convert the resized batch into latent vectors
             z_batch = generate_latents_from_obs(
                     obs_imgs=obs_imgs,
@@ -346,10 +395,14 @@ def generate_waypoints(
                     # data_pos=batch_size * idx,
                     data_pos=0,  # TODO: TEMP================
                     visualize=False,
+                    create_intervals=True,
             )
-            print(f"shape of the stack: {z_batch[0].shape}, {z_batch[1].shape}")
 
-            assert z_batch[0].shape[0] == z_batch[1].shape[0]
+            # print("AFTER STACK\n", torch.cuda.memory_summary())
+            # print(f"shape of the stack: {z_batch[0].shape}, {z_batch[1].shape}")
+
+            if create_intervals:
+                assert z_batch[0].shape[0] == z_batch[1].shape[0]
 
             # save the visualization images (optional)
             if visualize:
@@ -362,10 +415,16 @@ def generate_waypoints(
                     plt.savefig(save_path)
 
                     wandb_images.append(wandb.Image(save_path))
-                    wandb.log({"ex": wandb_images}, commit=False)
+                wandb.log({"ex": wandb_images}, commit=False)
 
-            torch.save(z_batch, latent_file + f"_{idx}")
+            torch.save(z_batch, latent_file_idx)
+            print("Successfully saved waypoint latents!")
 
+            # just to be safe
+            del obs_imgs, z_batch, data
+            flush()
+
+            # print("END OF LOOP\n", torch.cuda.memory_summary())
             print("ELAPSED TIME: %.2f s." % (time.time() - start_time))
 
             # TODO: implement goal images
@@ -377,61 +436,45 @@ def generate_waypoints(
             # else:
             #     z_stacked = torch.cat((z_stacked, z_w), dim=0)
 
-            # # TODO: temporary stop point
-            # if z_batch[0].size(0) > 2000:
-            #     break
-
-            # for obs in viz_obs_img:
-            #     print("Generating embeddings from observation...")
-            #     z_t = generate_embeddings_from_obs(
-            #             obs,
-            #             seg_model,
-            #             mb_vit
-            #             )  # TODO: error may occur here
-            #     
-            #     if z_stacked is None:
-            #         z_stacked = z_t
-            #     else:    
-            #         print("\nBEFORE")
-            #         print(z_stacked.shape)
-            #         print(z_t.shape)
-            #         z_stacked = torch.cat((z_stacked, z_t), dim=0)
-            #         print("AFTER\n", z_stacked.shape)
-
-            #     # TODO: this is temporary
-            #     if z_stacked.shape[0] == 100:
-            #         break
-            # break  # TODO: temp
-
-        # torch.save(z_stacked, latent_file)
         # torch.save(z_batch, latent_file)
-        print("Successfully saved waypoint latents!")
+        print("Finished saving waypoint latents!")
 
         # TODO: Program doesn't need to continue at this point
         sys.exit()
     else:
-        z_w = None
-        intervals = None
-        for root, dirs, files in os.walk(latent_dir):
-            for f in tqdm.tqdm(files, "Loading waypoints..."):
-                batch = torch.load(os.path.join(root, f))
-                
-                if z_w is None:
-                    z_w = batch[0]
-                    intervals = batch[1]
-                else:
-                    z_w = torch.cat((z_w, batch[0]))
-                    intervals = np.concatenate((intervals, batch[1]))
+        if create_intervals:
+            z_w = None
+            intervals = None
+            for root, dirs, files in os.walk(latent_dir):
+                for f in tqdm.tqdm(files, "Loading waypoints..."):
+                    batch = torch.load(os.path.join(root, f))
 
-        del batch  # final batch should be freed
-        gc.collect()
+                    if z_w is None:
+                        z_w = batch[0]
+                        intervals = batch[1]
+                    else:
+                        z_w = torch.cat((z_w, batch[0]))
+                        intervals = np.concatenate((intervals, batch[1]))
 
-        assert z_w.shape[0] == intervals.shape[0]
+            assert z_w.shape[0] == intervals.shape[0]
 
-        print(f"Successfully loaded waypoint latents! Shapes: {z_w.shape}, {intervals.shape}")
+            print(f"Successfully loaded waypoint latents! Shapes: {z_w.shape}, {intervals.shape}")
 
-    return z_w, intervals
+            return z_w, intervals
+        else:
+            z_w = None
+            for root, dirs, files in os.walk(latent_dir):
+                for f in tqdm.tqdm(files, "Loading waypoints..."):
+                    batch = torch.load(os.path.join(root, f))
 
+                    if z_w is None:
+                        z_w = batch[0]
+                    else:
+                        z_w = torch.cat((z_w, batch[0]))
+
+            print(f"Successfully loaded waypoint latents! Shapes: {z_w.shape}")
+
+            return z_w
 
 def compute_stl_loss(
     obs_imgs: torch.Tensor, 
@@ -439,13 +482,24 @@ def compute_stl_loss(
     device: torch.device,
     # formula: stlcg.STL_Formula,
     models: tuple,
+    margin: int = 0.05,
     visualize: bool = False,
 ) -> torch.Tensor:
     """
     Generates STL formula and inputs for robustness, while computing the STL
     loss based on robustness.
+
+    Args:
+        obs_imgs: online observation training images.
+        wp_latents: waypoint latents to perform cosSim with.
+        device: device to transfer tensors onto.
+        models: encoder needed for observation latents.
+        visualize: boolean determining the STL formula visualization.
+
+    Returns:
+         stl_loss: the computed STL loss with no loss weight.
     """
-    start_time = time.time()
+    # start_time = time.time()
 
     # don't need intervals for observation latents
     obs_latents = generate_latents_from_obs(
@@ -455,10 +509,12 @@ def compute_stl_loss(
             gen_subgoal=False,
     )
 
+    # for intervals
     intervals = wp_latents[1]  # tricky, careful about ordering here
-    wp_latents = wp_latents[0].reshape(-1, wp_latents[0].size(-1)).to(device)
+    # wp_latents = wp_latents[0].reshape(-1, wp_latents[0].size(-1)).to(device)
+    wp_latents = wp_latents[0].to(device)
 
-    print(f"time: {time.time() - start_time}")
+    # print(f"time: {time.time() - start_time}")
 
     # for each waypoint, compute cos_sim for the observation batch
     outer_form = None
@@ -564,7 +620,6 @@ def compute_stl_loss(
     )
 
     print(cos_sims)
-
     print("cossim shape:", cos_sims.shape)
 
     assert cos_sims.shape[0] == intervals.shape[0]
@@ -588,12 +643,14 @@ def compute_stl_loss(
                 stlcg.Expression("phi_j", cos_sim) > THRESHOLD,
                 interval=[intervals[i][0], intervals[i][1]]
         )
+        # cos_sim = stlcg.Expression("phi_j", cos_sim) > THRESHOLD
 
         if outer_form is None:
             outer_form = cos_sim
         else:
             outer_form = outer_form | cos_sim
-     
+            # outer_form = stlcg.Until(outer_form, cos_sim)
+
     # print(outer_form)
 
     if outer_form is None:
@@ -606,10 +663,9 @@ def compute_stl_loss(
         print("Saved formula CG successfully.")
 
     # compute the robustness
-    margin = 0.0
     # print(inputs)
     robustness = (-outer_form.robustness(inputs)).squeeze() 
-    stl_loss = F.leaky_relu(robustness - margin).mean()
+    stl_loss = torch.relu(robustness - margin).mean()
 
     print(f"STL loss: {stl_loss}, \tTime (s): {time.time() - start_time}")
     
