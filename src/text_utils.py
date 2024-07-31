@@ -6,6 +6,8 @@ from typing import Tuple, List
 from collections import namedtuple
 import gc
 
+from constants import *
+
 # for visualization class color mappings
 CityscapesClass = namedtuple('CityscapesClass', ['name', 'id', 'train_id', 'category', 'category_id',
                                                      'has_instances', 'ignore_in_eval', 'color'])
@@ -59,8 +61,6 @@ def valid_landmark(preds_unique: np.ndarray, num_thresh: int, object_landmarks: 
     """
     Images must have the correct object landmarks, have enough pixel
     predictions, and have enough landmarks.
-
-    TODO: max counts to landmark -> object persistence interval
     """
     # object_landmarks = [2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15, 16, 17, 18]
     # object_landmarks = np.array([2, 3, 4, 5, 6, 7])
@@ -95,12 +95,8 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[np.ndarray, np.nda
     end = None
     # time elapsed between initial tracking of landmark
     dt = 0
-    # for filter criteria
-    num_thresh = 1
-    # for object persistence
-    persistence_thresh = 5
     # valid landmarks
-    object_landmarks = np.array([2, 3, 4, 5, 6, 7, 8, 9])
+    object_landmarks = np.array([2, 3, 4, 5, 6, 7])
     # object_landmarks = np.array([i for i in range(19)])
 
     # retrieve n-top unique classes
@@ -111,7 +107,7 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[np.ndarray, np.nda
         lm_id = preds_unique[np.argmax(counts)]
 
         # skip preds based on criteria
-        # if not valid_landmark(preds_unique, num_thresh, object_landmarks):
+        # if not valid_landmark(preds_unique, NUM_THRESH, object_landmarks):
 
         # we only care about the main landmark
         if lm_id not in object_landmarks:
@@ -120,11 +116,12 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[np.ndarray, np.nda
                 end = start + dt
 
                 # only when a valid landmark is seen and robot sees objects for more than dt frames
-                if not dt < persistence_thresh:
+                if not dt < PERSISTENCE_THRESH:
                     print(f"Not good landmark -> final interval: [{start}, {end}]")
                     # if robot sees object for only a couple frames, it's not good grounds to include it as a landmark
                     intervals.append([start, end])
-                    preds.append(curr_lm)  # for now, add full prediction after filtering
+                    preds.append(curr_pred)
+                    # preds.append(curr_lm)  # for now, add full prediction after filtering
 
                 # next iteration, update with an valid landmark or skip
                 curr_lm = None
@@ -135,21 +132,21 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[np.ndarray, np.nda
 
         # filter out unique predictions
         # don't do unnecessary computation if not necessary
-        # if preds_unique.shape[0] < num_thresh:
+        # if preds_unique.shape[0] < NUM_THRESH:
         # top_idx = np.arange(len(preds_unique))
         # else:
-        # top_idx = heapq.nlargest(num_thresh, preds_unique)  # for sets
-        # top_idx = np.argpartition(preds_unique, -num_thresh)[-num_thresh:]
+        # top_idx = heapq.nlargest(NUM_THRESH, preds_unique)  # for sets
+        # top_idx = np.argpartition(preds_unique, -NUM_THRESH)[-NUM_THRESH:]
         # n_top = preds_unique[top_idx]
 
         # handle object persistence: top-1 landmark
         # lm_id = preds_unique[np.argmax(counts)]
 
         # sometimes unique predictions per img are limited
-        # if preds_unique.shape[0] < num_thresh:
+        # if preds_unique.shape[0] < NUM_THRESH:
         #     top_idx = np.arange(len(preds_unique))
         # else:
-        #     top_idx = np.argpartition(counts, -num_thresh)[-num_thresh:]
+        #     top_idx = np.argpartition(counts, -NUM_THRESH)[-NUM_THRESH:]
             # print("Top idx based on counts", top_idx)
             # print("Counts", counts)
         # lm_id = preds_unique[top_idx]  # subset of original predictions
@@ -171,7 +168,7 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[np.ndarray, np.nda
 
         if curr_lm is None:
             curr_lm = lm_id
-            # curr_pred = preds_unique
+            curr_pred = preds_unique
             start = t_start
             continue
 
@@ -181,14 +178,15 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[np.ndarray, np.nda
             end = start + dt
 
             # if object persistence < dt, restart the counter, but the current landmark doesn't qualify
-            if not dt < persistence_thresh:
+            if not dt < PERSISTENCE_THRESH:
                 print(f"Good landmark -> final interval: [{start}, {end}]")
                 intervals.append([start, end])
-                preds.append(curr_lm)  # for now, add full prediction after filtering
+                preds.append(curr_pred)
+                # preds.append(curr_lm)  # for now, add full prediction after filtering
 
             # update current landmark if they're different
             curr_lm = lm_id
-            # curr_pred = preds_unique
+            curr_pred = preds_unique
             # only update start at the beginning of each new landmark
             start = t_start
             dt = 0
@@ -202,13 +200,13 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[np.ndarray, np.nda
 
     # convert to class labels based on indices
     preds = [train_id_to_name[p] for p in preds]
-    print(f"NUM PREDICTIONS: {len(preds)}")
 
     preds = [" and ".join(preds[i].reshape(-1)) \
                 for i in range(len(preds))
     ]
 
-    print("PROMPTS:", preds[0:4])
+    print("PROMPTS:", preds)
+    print(f"NUM IMAGES/PROMPTS: {len(preds)}")
 
     return preds, intervals
 
@@ -248,5 +246,8 @@ def visualize_segmentation(obs_imgs: torch.Tensor, unnormalized_preds: np.ndarra
 
 
 def flush():
-  gc.collect()
-  torch.cuda.empty_cache()
+    """
+    Frees up heap + GPU cached memory
+    """
+    gc.collect()
+    torch.cuda.empty_cache()
