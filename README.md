@@ -1,7 +1,7 @@
 # Neural STL Controller for Autonomous Visual Navigation
 
 ## Overview
-This code modifies the repositories for [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/). 
+This code modifies and depends on the repositories for [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/). 
 
 ## Setup
 
