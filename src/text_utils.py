@@ -72,7 +72,18 @@ def valid_landmark(preds_unique: np.ndarray, num_thresh: int, object_landmarks: 
     return len(in_landmarks) != 0
 
 
-def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[np.ndarray, np.ndarray]:
+def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[List, np.ndarray]:
+    """
+    Filters predictions based on criteria, used for text-to-image subgoal generation.
+
+    Args:
+        outputs (np.ndarray): raw outputs of semantic segmentation model.
+        data_pos (int): dataset position in loading loop.
+
+    Returns:
+        (preds, intervals) (tuple):
+            a list of prompts for the text-to-image model and corresponding intervals array for each image.
+    """
     # return the max probability for each image
     preds = outputs.max(1)[1].detach().cpu().numpy()
     preds[preds == 255] = 19
