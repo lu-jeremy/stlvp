@@ -6,7 +6,8 @@ This code modifies the repositories for [NoMaD](https://github.com/robodhruv/vis
 ## Setup
 
 This project was run on an NVIDIA RTX 3090 GPU. Users should have access to workstations with Ubuntu 18.04/20.04, Python 3.9+, and CUDA 11.3+.
-The models used are from the Hugging Face directory, and hence require an API key, which should be specified as an environment variable in the docker container. Also, it is recommended to build the docker image from the Dockerfile and run the training script. Ensure that the utils/delete_roscpp_loggers.py file is copied properly to avoid ROS errors with the roscpp dependency.
+
+The models used are from the Hugging Face directory, and hence require an API key, which should be specified as an environment variable in the docker container. Also, it is recommended to build the docker image from the Dockerfile and run the training script.
 ```
 docker build -t [image_name] .
 ./scripts/train_nomad.sh
