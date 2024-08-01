@@ -4,7 +4,10 @@
 This code modifies the repositories for [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/). 
 
 ## Setup
-It is recommended to build the docker image from the Dockerfile and run it. Ensure that the utils/delete_roscpp_loggers.py file is properly copied to avoid future ROS errors with the roscpp dependency.
+
+This project was run on an NVIDIA RTX 3090 GPU. Users should have access to workstations with Ubuntu 18.04/20.04, Python 3.9+, and CUDA 11.3+.
+
+The models used are from the Hugging Face directory, and hence require an API key, which should be specified as an environment variable when running the container. Also, it is recommended to build the image from the Dockerfile provided and run the training script.
 ```
 docker build -t [image_name] .
 ./scripts/train_nomad.sh
