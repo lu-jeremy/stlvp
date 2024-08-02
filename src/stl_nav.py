@@ -604,18 +604,18 @@ def compute_stl_loss(
     for stream in streams:
         stream.synchronize()
 
-    fig, ax = plt.subplots()
-    x = range(0, len(sims) * 100, 100)
-    ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
-    ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
-
-    for i, a in enumerate(annots):
-        ax.annotate(a, (x[i], sims[i]))
-
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Similarity Metrics")
-    plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
-    plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
+    # fig, ax = plt.subplots()
+    # x = range(0, len(sims) * 100, 100)
+    # ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
+    # ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
+    #
+    # for i, a in enumerate(annots):
+    #     ax.annotate(a, (x[i], sims[i]))
+    #
+    # ax.set_xlabel("Time")
+    # ax.set_ylabel("Similarity Metrics")
+    # plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
+    # plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
 
     print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
 
