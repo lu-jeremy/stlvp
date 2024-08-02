@@ -47,11 +47,11 @@ from network import modeling
 
 """
 TODO
-- make better plots
-- figure out why stl takes so long, reduce time
-- make sure each batch is 1 run
 - transforms obs w/ action
 
+- figure out why stl takes so long, reduce time
+- make sure each batch is 1 run
+- stream outside training loop
 - parallelize wp generation process
 - lerp, slerp, etc...
 - try leakyrelu
@@ -88,10 +88,6 @@ if not os.path.isdir(subgoal_dir):
 
 if not os.path.isdir(goal_dir):
     os.makedirs(goal_dir, exist_ok=True)
-
-# just for visualization of sims
-sims = []
-annots = []
 
 
 def load_models(device: torch.device) -> Tuple:
@@ -559,14 +555,17 @@ def compute_stl_loss(
     full_exp = None
     # signal inputs to the robustness function
     full_inputs = ()
+    # used for similarity visualization
+    sims = []
+    annots = []
 
     test_start = time.time()
 
     # multi-stream setup
-    # streams = [torch.cuda.Stream() for _ in range(len(wp_latents))]
-    streams = [torch.cuda.Stream() for _ in range(3)]
+    streams = [torch.cuda.Stream() for _ in range(len(wp_latents))]
+    # streams = [torch.cuda.Stream() for _ in range(2)]
 
-    print(f"len wp latents: {len(wp_latents)}, len interavls: {len(intervals)}, len obs latents: {len(obs_latents)}")
+    print(f"len wp latents: {len(wp_latents)}, len intervals: {len(intervals)}, len obs latents: {len(obs_latents)}")
     for i, stream in enumerate(streams):
         inner_inputs, inner_exp = process_run(
             curr_stream=stream,
@@ -575,13 +574,15 @@ def compute_stl_loss(
             curr_goal=goal_latents[i],
             obs_latents=obs_latents,
             threshold=threshold,
+            sims=sims,
+            annots=annots,
         )
 
-        print(inner_inputs)
-        print(full_inputs)
-
-        print(len(inner_inputs))
-        print(len(full_inputs))
+        # print(inner_inputs)
+        # print(full_inputs)
+        #
+        # print(len(inner_inputs))
+        # print(len(full_inputs))
 
         # recursively add inner inputs to full inputs
         if len(full_inputs) == 0:
@@ -591,8 +592,8 @@ def compute_stl_loss(
         else:
             full_inputs = (full_inputs, inner_inputs)
 
-        print(full_inputs)
-        print(len(full_inputs))
+        # print(full_inputs)
+        # print(len(full_inputs))
 
         # recursively add inner exp to full exp
         if full_exp is None:
@@ -602,6 +603,19 @@ def compute_stl_loss(
 
     for stream in streams:
         stream.synchronize()
+
+    fig, ax = plt.subplots()
+    x = range(0, len(sims) * 100, 100)
+    ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
+    ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
+
+    for i, a in enumerate(annots):
+        ax.annotate(a, (x[i], sims[i]))
+
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Similarity Metrics")
+    plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
+    plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
 
     print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
 
@@ -755,6 +769,8 @@ def process_run(
         curr_goal: torch.Tensor,
         obs_latents: torch.Tensor,
         threshold: List,
+        sims: List,
+        annots: List,
 ) -> Tuple[Tuple, stlcg.Expression]:
     """
     Processes each stream for the current run.
@@ -766,6 +782,8 @@ def process_run(
         curr_goal (torch.Tensor): the current run's goal to process.
         obs_latents (torch.Tensor): all observation latents to perform comparison with.
         threshold (List): threshold values for STL similarity expressions.
+        sims (List): list of similarity metrics to visualize.
+        annots (List): list of annotations to visualize.
 
     Returns:
         inner_inputs, inner_exp (Tuple): the current inputs and STL expression for the current run.
@@ -813,7 +831,7 @@ def process_run(
             if inner_exp is None:
                 inner_exp = subgoal_sim
             else:
-                inner_exp |= subgoal_sim  # test AND
+                inner_exp &= subgoal_sim  # test AND
 
         # full_start = time.time()
 
@@ -830,24 +848,12 @@ def process_run(
         sims.append(to_numpy(goal_sim).flatten())
         annots.append("g")
 
-        if len(sims) % 500 == 0:
-            fig, ax = plt.subplots()
-            x = range(len(sims))
-            ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
-            ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
-
-            for i, a in enumerate(annots):
-                ax.annotate(a, (x[i], sims[i]))
-
-            ax.set_xlabel("Time")
-            ax.set_ylabel("Similarity Metrics")
-            plt.title(f"Multiple Run")
-            plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
-
         # print(f"time after goal: {time.time() - full_start}")
 
-        # goal is added to the initial unpacked value, not tuple
-        inner_inputs = (*inner_inputs, goal_sim)
+        if len(inner_inputs) <= 1:
+            inner_inputs = (*inner_inputs, goal_sim)
+        else:
+            inner_inputs = (inner_inputs, goal_sim)
 
         # add goal to STL formula
         goal_sim = stlcg.Expression("varphi_i", goal_sim) > threshold[1]
