@@ -47,17 +47,18 @@ from network import modeling
 
 """
 TODO
-- transforms obs w/ action
+- policy in STL
 
-- figure out why stl takes so long, reduce time
+- reduce STL time?
 - make sure each batch is 1 run
-- stream outside training loop
 - parallelize wp generation process
 - lerp, slerp, etc...
 - try leakyrelu
 - negative prompts/STL examples
 - faster text-to-image model
 - automate params on cmd line
+
+- our diffusion model is parallelized across multiple GPUs using nn.DataParallel
 """
 
 login(os.getenv("HUGGINGFACE_HUB_TOKEN"))
@@ -234,8 +235,12 @@ def generate_latents_from_obs(
 
         # no gradient accumulation significantly reduces memory footprint
         with torch.no_grad():
-            z_t = enc_model(obs_imgs).last_hidden_state
+            z_t = enc_model(obs_imgs, output_hidden_states=True).last_hidden_state
+            # print(z_t.shape)  # (256, 640, 8, 8)
+            # print(enc_model(obs_imgs).hidden_states)
+            # print(enc_model(obs_imgs).hidden_states.shape)
             z_t = z_t.view(z_t.size(0), -1)
+            # print(z_t.shape)  # (1, 40960)
 
         # if processing the goals, interpolate latents with equal weights
         if mode == "goal":
@@ -505,14 +510,18 @@ def generate_waypoints(
 
 
 def compute_stl_loss(
-        obs_imgs: torch.Tensor,
+        # obs_imgs: torch.Tensor,
+        obs_latents: torch.Tensor,
         batch_latents: torch.Tensor,
         goal_latents: torch.Tensor,
         device: torch.device,
         models: tuple,
-        margin: int = 0.05,
+        streams: List,
+        dataset_idx: int,
+        margin: int = 0,  # TODO: change
         enable_intervals: bool = ENABLE_INTERVALS,
         visualize_stl: bool = VISUALIZE_STL,
+        viz_freq: int = 50,
         threshold: List = SIM_THRESH,  # indicates the sensitivity of satisfaction for similarity distance
 ) -> torch.Tensor:
     """
@@ -523,11 +532,12 @@ def compute_stl_loss(
     (2) Broadcast obs latent to each target.
 
     Args:
-        obs_imgs (torch.Tensor): online observation training images.
+        obs_latents (torch.Tensor): online training observations.
         batch_latents (torch.Tensor): waypoint latents to perform similarity with + intervals.
         goal_latents (torch.Tensor): goal latents to perform similarity with.
         device (torch.device): device to transfer tensors onto.
         models (tuple): encoder needed for observation latents.
+        streams (List): a list of torch.cuda.Stream's instances to deploy runs on a multi-stream setup.
         margin (int): margin in the ReLU objective.
         enable_intervals (bool): boolean determining the inclusion of intervals in encoding process.
         visualize_stl (bool): boolean determining the STL formula visualization.
@@ -535,17 +545,19 @@ def compute_stl_loss(
     Returns:
          stl_loss (torch.Tensor): the computed STL loss with no loss weight.
     """
+    flush()
+
     start_time = time.time()
 
     # don't need intervals for observation latents
-    obs_latents = generate_latents_from_obs(
-        mode="training",
-        obs_imgs=obs_imgs,
-        models=models,
-        device=device,
-        enable_intervals=enable_intervals,
-        visualize_subgoals=False,
-    )
+    # obs_latents = generate_latents_from_obs(
+    #     mode="training",
+    #     obs_imgs=obs_imgs,
+    #     models=models,
+    #     device=device,
+    #     enable_intervals=enable_intervals,
+    #     visualize_subgoals=False,
+    # )
 
     # unpacking tuple
     wp_latents = batch_latents[0]
@@ -561,11 +573,10 @@ def compute_stl_loss(
 
     test_start = time.time()
 
-    # multi-stream setup
-    streams = [torch.cuda.Stream() for _ in range(len(wp_latents))]
-    # streams = [torch.cuda.Stream() for _ in range(2)]
-
     print(f"len wp latents: {len(wp_latents)}, len intervals: {len(intervals)}, len obs latents: {len(obs_latents)}")
+
+    # streams = [torch.cuda.Stream() for _ in range(3)]
+
     for i, stream in enumerate(streams):
         inner_inputs, inner_exp = process_run(
             curr_stream=stream,
@@ -587,8 +598,10 @@ def compute_stl_loss(
         # recursively add inner inputs to full inputs
         if len(full_inputs) == 0:
             full_inputs = inner_inputs
-        elif len(full_inputs) == 1:
-            full_inputs = (*full_inputs, inner_inputs)
+        # elif len(full_inputs) == 1:
+        #     full_inputs = (*full_inputs, inner_inputs)
+        # # if len(full_inputs) <= 1:
+        # #     full_inputs = (*full_inputs, inner_inputs)
         else:
             full_inputs = (full_inputs, inner_inputs)
 
@@ -601,31 +614,35 @@ def compute_stl_loss(
         else:
             full_exp |= inner_exp
 
+    # print(full_exp)
+    # print(full_inputs)
+
     for stream in streams:
         stream.synchronize()
 
-    # fig, ax = plt.subplots()
-    # x = range(0, len(sims) * 100, 100)
-    # ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
-    # ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
-    #
-    # for i, a in enumerate(annots):
-    #     ax.annotate(a, (x[i], sims[i]))
-    #
-    # ax.set_xlabel("Time")
-    # ax.set_ylabel("Similarity Metrics")
-    # plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
-    # plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
+    if VISUALIZE_SIM:
+        if dataset_idx % viz_freq == 0:
+            sims = sims[:20]
+            annots = annots[:20]
 
-    print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
+            fig, ax = plt.subplots()
+            x = range(0, len(sims) * 100, 100)
+            ax.plot(x, sims, marker='o', linestyle='-', label='Similarities')
+            # ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
+            # ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
+
+            for i, a in enumerate(annots):
+                ax.annotate(a, (x[i], sims[i]))
+
+            ax.set_xlabel("Time")
+            ax.set_ylabel("Similarity Metrics")
+            plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
+            plt.savefig(os.path.join(IMG_DIR, f"run_{dataset_idx}.png"))
+
+        print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
 
     if full_exp is None:
         raise ValueError(f"Formula is not properly defined.")
-
-    # print(full_exp)
-    # print(full_inputs)
-    # print(len(tuple(full_exp.__str__())))
-    # print(len(full_inputs))
 
     # saves a digraph of the STL formula
     if visualize_stl:
@@ -639,127 +656,9 @@ def compute_stl_loss(
 
     print(f"STL loss: {stl_loss}, \tSTL Computation Time (s): {time.time() - start_time}")
 
-    return stl_loss
+    flush()
 
-    # for i in range(len(wp_latents)):
-    #     curr_latent = wp_latents[i]
-    #     inner_exp = None
-    #     inner_inputs = ()
-    #
-    #     loop_start = time.time()
-    #
-    #     print("before curr latent", i, f"len curr latent: {len(curr_latent)}")
-    #
-    #     for j in range(len(curr_latent)):
-    #         inner_start = time.time()
-    #
-    #         # compute subgoal similarity and convert to valid STL input
-    #         subgoal_sim = F.cosine_similarity(
-    #             curr_latent[j].unsqueeze(0).expand(obs_latents.size(0), -1),
-    #             obs_latents,
-    #             dim=-1
-    #         ).mean().unsqueeze(0).unsqueeze(0).unsqueeze(0)
-    #
-    #         # for visualization
-    #         sims.append(to_numpy(subgoal_sim).flatten())
-    #         annots.append(f"w_{len(sims)}")
-    #
-    #         # recursively add subgoal metric to inner inputs
-    #         if len(inner_inputs) <= 1:
-    #             inner_inputs = (*inner_inputs, subgoal_sim)
-    #         else:
-    #             inner_inputs = (inner_inputs, subgoal_sim)
-    #
-    #         print(f"time after subgoal: {time.time() - inner_start}")
-    #
-    #         # access the current interval
-    #         curr_interval = intervals[i][j]
-    #
-    #         # add subgoal to STL formula
-    #         subgoal_sim = stlcg.Eventually(
-    #             stlcg.Expression("phi_ij", subgoal_sim) > threshold[0],
-    #             interval=[curr_interval[0], curr_interval[1]]
-    #         )
-    #
-    #         # recursively add subgoal exp to inner exp
-    #         if inner_exp is None:
-    #             inner_exp = subgoal_sim
-    #         else:
-    #             inner_exp |= subgoal_sim  # TODO: test AND
-    #
-    #     full_start = time.time()
-    #
-    #     # compute goal similarity and convert to valid STL input
-    #     goal_sim = F.cosine_similarity(
-    #         goal_latents[i].expand(obs_latents.size(0), -1),  # TODO: see if this works
-    #         obs_latents,
-    #         dim=-1
-    #     ).mean().unsqueeze(0).unsqueeze(0).unsqueeze(0)
-    #
-    #     print("finished goal sim")
-    #
-    #     # visualization, must move tensor to CPU
-    #     sims.append(to_numpy(goal_sim).flatten())
-    #     annots.append("g")
-    #
-    #     if len(sims) % 500 == 0:
-    #         fig, ax = plt.subplots()
-    #         x = range(len(sims))
-    #         ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
-    #         ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
-    #
-    #         for i, a in enumerate(annots):
-    #             ax.annotate(a, (x[i], sims[i]))
-    #
-    #         ax.set_xlabel("Time")
-    #         ax.set_ylabel("Similarity Metrics")
-    #         plt.title(f"Multiple Run")
-    #         plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
-    #
-    #     print(f"time after goal: {time.time() - full_start}")
-    #
-    #     # add goal metric to inner inputs
-    #     inner_inputs = (inner_inputs, goal_sim)
-    #
-    #     # recursively add inner inputs to full inputs
-    #     if len(full_inputs) <= 1:
-    #         full_inputs = (*full_inputs, inner_inputs)
-    #     else:
-    #         full_inputs = (full_inputs, inner_inputs)
-    #
-    #     # add goal to STL formula
-    #     inner_exp = stlcg.Until(inner_exp, stlcg.Expression("varphi_i", goal_sim) > threshold[1])
-    #
-    #     # recursively add inner exp to full exp
-    #     if full_exp is None:
-    #         full_exp = inner_exp
-    #     else:
-    #         full_exp |= inner_exp
-    #
-    #     print(f"loop time: {time.time() - loop_start}")
-    #
-    # # print(f"LEN EXP: {len(full_exp)}, LEN INPUTS: {len(full_inputs)}")
-    # print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
-    #
-    # if full_exp is None:
-    #     raise ValueError(f"Formula is not properly defined.")
-    #
-    # print(full_exp)
-    # print(full_inputs)
-    #
-    # # saves a digraph of the STL formula
-    # if visualize_stl:
-    #     digraph = viz.make_stl_graph(full_exp)
-    #     viz.save_graph(digraph, "utils/formula")
-    #     print("Saved formula CG successfully.")
-    #
-    # # recursive depth may result in overloading stack memory
-    # robustness = (-full_exp.robustness(full_inputs)).squeeze()
-    # stl_loss = torch.relu(robustness - margin).mean()
-    #
-    # print(f"STL loss: {stl_loss}, \tTime (s): {time.time() - start_time}")
-    #
-    # return stl_loss
+    return stl_loss
 
 
 def process_run(
@@ -792,29 +691,46 @@ def process_run(
         inner_exp = None
         inner_inputs = ()
 
-        loop_start = time.time()
+        # loop_start = time.time()
 
         for j in range(len(curr_run)):
             # inner_start = time.time()
 
-            curr_wp = curr_run[j]
+            # transform latents to match obs condition vector for similarity computation
+            curr_wp = curr_run[j].reshape(-1, obs_latents.size(0))  # (160, 256)
+            # simple computation purposes, linear interpolation
+            # weights = (torch.ones(len(curr_wp), device=curr_wp.device) / len(curr_wp)).view(1, -1)
+            # curr_wp = weights @ curr_wp
 
             # compute subgoal similarity and convert to valid STL input
             subgoal_sim = F.cosine_similarity(
-                curr_wp.unsqueeze(0).expand(obs_latents.size(0), -1),
-                obs_latents,
+                # curr_wp.unsqueeze(0).expand(obs_latents.size(0), -1),
+                # curr_wp.expand(obs_latents.size(0), -1),
+                # obs_latents,
+                curr_wp.unsqueeze(1).expand(-1, obs_latents.size(0), -1),
+                obs_latents.unsqueeze(0).expand(curr_wp.size(0), -1, -1),
                 dim=-1
             ).mean().unsqueeze(0).unsqueeze(0).unsqueeze(0)
+
+            # print("SUBGOAL", subgoal_sim)
+
+            # print(inner_inputs)
 
             # for visualization
             sims.append(to_numpy(subgoal_sim).flatten())
             annots.append(f"w_{len(sims)}")
 
             # recursively add subgoal metric to inner inputs
-            if len(inner_inputs) <= 1:
-                inner_inputs = (*inner_inputs, subgoal_sim)
+            if len(inner_inputs) == 0:
+                inner_inputs = subgoal_sim
+            # elif len(inner_inputs) == 1:
+            #     inner_inputs = (*inner_inputs, subgoal_sim)
             else:
                 inner_inputs = (inner_inputs, subgoal_sim)
+
+            # print(inner_inputs)
+
+            # sys.exit()
 
             # print(f"time after subgoal: {time.time() - inner_start}")
 
@@ -831,33 +747,34 @@ def process_run(
             if inner_exp is None:
                 inner_exp = subgoal_sim
             else:
-                inner_exp &= subgoal_sim  # test AND
+                inner_exp &= subgoal_sim  # test AND vs OR
 
-        # full_start = time.time()
-
-        # compute goal similarity and convert to valid STL input
-        goal_sim = F.cosine_similarity(
-            curr_goal.expand(obs_latents.size(0), -1),  # TODO: see if this works
-            obs_latents,
-            dim=-1
-        ).mean().unsqueeze(0).unsqueeze(0).unsqueeze(0)
-
-        # print("finished goal sim")
-
-        # visualization, must move tensor to CPU
-        sims.append(to_numpy(goal_sim).flatten())
-        annots.append("g")
-
-        # print(f"time after goal: {time.time() - full_start}")
-
-        if len(inner_inputs) <= 1:
-            inner_inputs = (*inner_inputs, goal_sim)
-        else:
-            inner_inputs = (inner_inputs, goal_sim)
-
-        # add goal to STL formula
-        goal_sim = stlcg.Expression("varphi_i", goal_sim) > threshold[1]
-        inner_exp = stlcg.Until(inner_exp, goal_sim)
+        # # transform goals to meet obs dims
+        # curr_goal = curr_goal.reshape(-1, obs_latents.size(0))  # (160, 256)
+        #
+        # # compute goal similarity and convert to valid STL input
+        # goal_sim = F.cosine_similarity(
+        #     # curr_goal.expand(obs_latents.size(0), -1),
+        #     # obs_latents,
+        #     curr_goal.unsqueeze(1).expand(-1, obs_latents.size(0), -1),
+        #     obs_latents.unsqueeze(0).expand(curr_goal.size(0), -1, -1),
+        #     dim=-1
+        # ).mean().unsqueeze(0).unsqueeze(0).unsqueeze(0)
+        #
+        # # print("GOAL SIM", goal_sim)
+        #
+        # # visualization, must move tensor to CPU
+        # sims.append(to_numpy(goal_sim).flatten())
+        # annots.append("g")
+        #
+        # if len(inner_inputs) <= 1:
+        #     inner_inputs = (*inner_inputs, goal_sim)
+        # else:
+        #     inner_inputs = (inner_inputs, goal_sim)
+        #
+        # # add goal to STL formula
+        # goal_sim = stlcg.Expression("varphi_i", goal_sim) > threshold[1]
+        # inner_exp = stlcg.Until(inner_exp, goal_sim)
 
         # print(f"loop time: {time.time() - loop_start}")
 
