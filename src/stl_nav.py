@@ -47,17 +47,18 @@ from network import modeling
 
 """
 TODO
-- transforms obs w/ action
+- policy in STL
 
-- figure out why stl takes so long, reduce time
+- reduce STL time?
 - make sure each batch is 1 run
-- stream outside training loop
 - parallelize wp generation process
 - lerp, slerp, etc...
 - try leakyrelu
 - negative prompts/STL examples
 - faster text-to-image model
 - automate params on cmd line
+
+- our diffusion model is parallelized across multiple GPUs using nn.DataParallel
 """
 
 login(os.getenv("HUGGINGFACE_HUB_TOKEN"))
@@ -234,8 +235,12 @@ def generate_latents_from_obs(
 
         # no gradient accumulation significantly reduces memory footprint
         with torch.no_grad():
-            z_t = enc_model(obs_imgs).last_hidden_state
+            z_t = enc_model(obs_imgs, output_hidden_states=True).last_hidden_state
+            # print(z_t.shape)  # (256, 640, 8, 8)
+            # print(enc_model(obs_imgs).hidden_states)
+            # print(enc_model(obs_imgs).hidden_states.shape)
             z_t = z_t.view(z_t.size(0), -1)
+            # print(z_t.shape)  # (1, 40960)
 
         # if processing the goals, interpolate latents with equal weights
         if mode == "goal":
@@ -505,11 +510,13 @@ def generate_waypoints(
 
 
 def compute_stl_loss(
-        obs_imgs: torch.Tensor,
+        # obs_imgs: torch.Tensor,
+        obs_latents: torch.Tensor,
         batch_latents: torch.Tensor,
         goal_latents: torch.Tensor,
         device: torch.device,
         models: tuple,
+        streams: List,
         margin: int = 0.05,
         enable_intervals: bool = ENABLE_INTERVALS,
         visualize_stl: bool = VISUALIZE_STL,
@@ -523,11 +530,12 @@ def compute_stl_loss(
     (2) Broadcast obs latent to each target.
 
     Args:
-        obs_imgs (torch.Tensor): online observation training images.
+        obs_latents (torch.Tensor): online training observations.
         batch_latents (torch.Tensor): waypoint latents to perform similarity with + intervals.
         goal_latents (torch.Tensor): goal latents to perform similarity with.
         device (torch.device): device to transfer tensors onto.
         models (tuple): encoder needed for observation latents.
+        streams (List): a list of torch.cuda.Stream's instances to deploy runs on a multi-stream setup.
         margin (int): margin in the ReLU objective.
         enable_intervals (bool): boolean determining the inclusion of intervals in encoding process.
         visualize_stl (bool): boolean determining the STL formula visualization.
@@ -538,18 +546,24 @@ def compute_stl_loss(
     start_time = time.time()
 
     # don't need intervals for observation latents
-    obs_latents = generate_latents_from_obs(
-        mode="training",
-        obs_imgs=obs_imgs,
-        models=models,
-        device=device,
-        enable_intervals=enable_intervals,
-        visualize_subgoals=False,
-    )
+    # obs_latents = generate_latents_from_obs(
+    #     mode="training",
+    #     obs_imgs=obs_imgs,
+    #     models=models,
+    #     device=device,
+    #     enable_intervals=enable_intervals,
+    #     visualize_subgoals=False,
+    # )
 
     # unpacking tuple
     wp_latents = batch_latents[0]
     intervals = batch_latents[1]
+
+    # transform latents to match obs condition vector for similarity computation
+    wp_latents = [run.reshape(-1, obs_latents.size(0)) for run in wp_latents]
+    print(f"WP LATENT SHAPE: {np.array(wp_latents).shape}")
+    goal_latents = [goal.reshape(-1, obs_latents.size(0)) for goal in goal_latents]
+    print(f"GOAL LATENT SHAPE: {np.array(wp_latents).shape}")
 
     # full expression used for training
     full_exp = None
@@ -562,10 +576,10 @@ def compute_stl_loss(
     test_start = time.time()
 
     # multi-stream setup
-    streams = [torch.cuda.Stream() for _ in range(len(wp_latents))]
     # streams = [torch.cuda.Stream() for _ in range(2)]
 
     print(f"len wp latents: {len(wp_latents)}, len intervals: {len(intervals)}, len obs latents: {len(obs_latents)}")
+
     for i, stream in enumerate(streams):
         inner_inputs, inner_exp = process_run(
             curr_stream=stream,
@@ -604,20 +618,21 @@ def compute_stl_loss(
     for stream in streams:
         stream.synchronize()
 
-    # fig, ax = plt.subplots()
-    # x = range(0, len(sims) * 100, 100)
-    # ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
-    # ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
-    #
-    # for i, a in enumerate(annots):
-    #     ax.annotate(a, (x[i], sims[i]))
-    #
-    # ax.set_xlabel("Time")
-    # ax.set_ylabel("Similarity Metrics")
-    # plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
-    # plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
+    if VISUALIZE_SIM:
+        fig, ax = plt.subplots()
+        x = range(0, len(sims) * 100, 100)
+        ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
+        ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
 
-    print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
+        for i, a in enumerate(annots):
+            ax.annotate(a, (x[i], sims[i]))
+
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Similarity Metrics")
+        plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
+        plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
+
+        print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
 
     if full_exp is None:
         raise ValueError(f"Formula is not properly defined.")
@@ -792,7 +807,7 @@ def process_run(
         inner_exp = None
         inner_inputs = ()
 
-        loop_start = time.time()
+        # loop_start = time.time()
 
         for j in range(len(curr_run)):
             # inner_start = time.time()
@@ -837,7 +852,7 @@ def process_run(
 
         # compute goal similarity and convert to valid STL input
         goal_sim = F.cosine_similarity(
-            curr_goal.expand(obs_latents.size(0), -1),  # TODO: see if this works
+            curr_goal.expand(obs_latents.size(0), -1),
             obs_latents,
             dim=-1
         ).mean().unsqueeze(0).unsqueeze(0).unsqueeze(0)
