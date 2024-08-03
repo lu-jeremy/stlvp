@@ -517,12 +517,8 @@ def compute_stl_loss(
         device: torch.device,
         models: tuple,
         streams: List,
-<<<<<<< HEAD
         dataset_idx: int,
         margin: int = 0,  # TODO: change
-=======
-        margin: int = 0.05,
->>>>>>> 545d9dd1e168718ff11f428b2d9db616c20c7f5f
         enable_intervals: bool = ENABLE_INTERVALS,
         visualize_stl: bool = VISUALIZE_STL,
         viz_freq: int = 50,
@@ -567,12 +563,6 @@ def compute_stl_loss(
     wp_latents = batch_latents[0]
     intervals = batch_latents[1]
 
-    # transform latents to match obs condition vector for similarity computation
-    wp_latents = [run.reshape(-1, obs_latents.size(0)) for run in wp_latents]
-    print(f"WP LATENT SHAPE: {np.array(wp_latents).shape}")
-    goal_latents = [goal.reshape(-1, obs_latents.size(0)) for goal in goal_latents]
-    print(f"GOAL LATENT SHAPE: {np.array(wp_latents).shape}")
-
     # full expression used for training
     full_exp = None
     # signal inputs to the robustness function
@@ -583,18 +573,10 @@ def compute_stl_loss(
 
     test_start = time.time()
 
-<<<<<<< HEAD
     print(f"len wp latents: {len(wp_latents)}, len intervals: {len(intervals)}, len obs latents: {len(obs_latents)}")
 
     # streams = [torch.cuda.Stream() for _ in range(3)]
 
-=======
-    # multi-stream setup
-    # streams = [torch.cuda.Stream() for _ in range(2)]
-
-    print(f"len wp latents: {len(wp_latents)}, len intervals: {len(intervals)}, len obs latents: {len(obs_latents)}")
-
->>>>>>> 545d9dd1e168718ff11f428b2d9db616c20c7f5f
     for i, stream in enumerate(streams):
         inner_inputs, inner_exp = process_run(
             curr_stream=stream,
@@ -639,7 +621,6 @@ def compute_stl_loss(
         stream.synchronize()
 
     if VISUALIZE_SIM:
-<<<<<<< HEAD
         if dataset_idx % viz_freq == 0:
             sims = sims[:20]
             annots = annots[:20]
@@ -657,20 +638,6 @@ def compute_stl_loss(
             ax.set_ylabel("Similarity Metrics")
             plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
             plt.savefig(os.path.join(IMG_DIR, f"run_{dataset_idx}.png"))
-=======
-        fig, ax = plt.subplots()
-        x = range(0, len(sims) * 100, 100)
-        ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
-        ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
-
-        for i, a in enumerate(annots):
-            ax.annotate(a, (x[i], sims[i]))
-
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Similarity Metrics")
-        plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
-        plt.savefig(os.path.join(IMG_DIR, f"run_{len(sims)}.png"))
->>>>>>> 545d9dd1e168718ff11f428b2d9db616c20c7f5f
 
         print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
 
@@ -780,22 +747,7 @@ def process_run(
             if inner_exp is None:
                 inner_exp = subgoal_sim
             else:
-<<<<<<< HEAD
                 inner_exp &= subgoal_sim  # test AND vs OR
-=======
-                inner_exp &= subgoal_sim  # test AND
-
-        # full_start = time.time()
-
-        # compute goal similarity and convert to valid STL input
-        goal_sim = F.cosine_similarity(
-            curr_goal.expand(obs_latents.size(0), -1),
-            obs_latents,
-            dim=-1
-        ).mean().unsqueeze(0).unsqueeze(0).unsqueeze(0)
-
-        # print("finished goal sim")
->>>>>>> 545d9dd1e168718ff11f428b2d9db616c20c7f5f
 
         # # transform goals to meet obs dims
         # curr_goal = curr_goal.reshape(-1, obs_latents.size(0))  # (160, 256)
