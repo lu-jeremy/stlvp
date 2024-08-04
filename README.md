@@ -7,8 +7,10 @@ Clone the following repositories and their dependencies: [NoMaD](https://github.
 
 ## Setup
 
-This project was run on an NVIDIA RTX 3090 GPU. Users should have access to workstations with Ubuntu 18.04/20.04, Python 3.9+, and CUDA 11.3+.    
-The models used are from the Hugging Face directory, and hence require an API key, which should be specified as an environment variable when running the container.    
+This project was run on an NVIDIA RTX 3090 GPU. Users should have access to workstations with Ubuntu 18.04/20.04, Python 3.9+, and CUDA 11.3+.  
+
+The models used are from the Hugging Face directory, and hence require an API key, which should be specified as an environment variable when running the container.  
+
 Also, it is recommended to build the image from the Dockerfile provided and run the training script.  
 ```
 docker build -t [image_name] .
