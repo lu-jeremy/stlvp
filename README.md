@@ -1,4 +1,4 @@
-# Neural STL Controller for Autonomous Visual Navigation
+# Neural STL Vision Planner (STLVP)
 
 ## Overview
 This code depends and builds on the repositories for [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/). 
