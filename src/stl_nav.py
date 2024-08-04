@@ -547,6 +547,11 @@ def compute_stl_loss(
     """
     flush()
 
+    batch_size = 256
+    if obs_latents.size(0) < batch_size:
+        print(f"NOT LARGE ENOUGH: {obs_latents.size()}")
+        return torch.tensor(0.0)
+
     start_time = time.time()
 
     # don't need intervals for observation latents
@@ -574,8 +579,6 @@ def compute_stl_loss(
     test_start = time.time()
 
     print(f"len wp latents: {len(wp_latents)}, len intervals: {len(intervals)}, len obs latents: {len(obs_latents)}")
-
-    # streams = [torch.cuda.Stream() for _ in range(3)]
 
     for i, stream in enumerate(streams):
         inner_inputs, inner_exp = process_run(
