@@ -1,7 +1,9 @@
-# Neural STL Vision Planner (STLVP)
+# A Neural Signal Temporal Logic Vision Planner
 
 ## Overview
-This code depends and builds on the repositories for [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/). 
+This codebase builds on using the signal temporal logic computation graph (STLCG) platform for end-to-end visual navigation in robotics.
+
+Clone the following repositories and their dependencies: [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/) (PyTorch).
 
 ## Setup
 
