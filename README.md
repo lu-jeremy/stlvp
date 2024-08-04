@@ -11,7 +11,7 @@ This project was run on an NVIDIA RTX 3090 GPU. Users should have access to work
 
 The models used are from the Hugging Face directory, and hence require an API key, which should be specified as an environment variable when running the container.  
 
-Also, it is recommended to build the image from the Dockerfile provided and run the training script.  
+Also, it is recommended to build the image from the Dockerfile provided and run the training script:  
 ```
 docker build -t [image_name] .
 ./scripts/train_nomad.sh
