@@ -1,7 +1,7 @@
 # A Neural Signal Temporal Logic Vision Planner
 
 ## Overview
-This codebase builds on using the signal temporal logic computation graph (STLCG) platform for end-to-end visual navigation in robotics.
+This codebase builds on using the signal temporal logic computation graph (STLCG) platform for end-to-end visual navigation in robotics using raw observation image inputs.
 
 Clone the following repositories and their dependencies: [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/) (PyTorch).
 
