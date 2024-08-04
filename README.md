@@ -17,12 +17,12 @@ docker build -t [image_name] .
 
 However, if you are using a conda or virtual environment, follow these steps: 
 
-1. Clone the following repositories and their dependencies: [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/) (PyTorch) into your environment:
+1. Clone the following repositories [NoMaD](https://github.com/robodhruv/visualnav-transformer/) and [STLCG](https://github.com/StanfordASL/stlcg/) (PyTorch) into your environment:
 ```
 git clone git@github.com:robodhruv/visualnav-transformer.git git@github.com:StanfordASL/stlcg.git git@github.com:real-stanford/diffusion_policy.git
 ```
 
-2. Install the dependencies related to the GitHub repos.
+2. Install the related dependencies.
 ```
 pip install -e diffusion_policy/ visualnav-transformer/ stlcg/
 ```
