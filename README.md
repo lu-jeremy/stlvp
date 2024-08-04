@@ -2,7 +2,8 @@
 
 ## Overview
 This codebase implements the neural signal temporal logic vision planner (STLVP). STLVP builds on using signal temporal logic computation graphs (STLCG) for end-to-end visual navigation in robotics, using raw observation image inputs.  
-This repo modifies training files in the [NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration](https://github.com/robodhruv/visualnav-transformer/) project. Ensure that the STL functions are properly called in these files.
+
+This repository modifies training files in the [NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration](https://github.com/robodhruv/visualnav-transformer/) project. Ensure that the STL functions are properly called in these files.
 
 ## Setup
 
