@@ -47,15 +47,11 @@ from network import modeling
 
 """
 TODO
-- policy in STL
-
-- reduce STL time?
 - make sure each batch is 1 run
-- parallelize wp generation process
+- parallelize wp generation process, faster text-to-image model
 - lerp, slerp, etc...
 - try leakyrelu
 - negative prompts/STL examples
-- faster text-to-image model
 - automate params on cmd line
 
 - our diffusion model is parallelized across multiple GPUs using nn.DataParallel
@@ -67,22 +63,25 @@ sys.setrecursionlimit(10000)  # needed for STL robustness
 
 # TODO: watch out for these lines
 # reset img and latent directories
-if not os.path.isdir(IMG_DIR):
-    os.makedirs(IMG_DIR, exist_ok=True)
+img_path = os.path.join(WP_DIR, IMG_DIR)
+latent_path = os.path.join(WP_DIR, LATENT_DIR)
+
+if not os.path.isdir(img_path):
+    os.makedirs(img_path, exist_ok=True)
 else:
     if RESET_IMG_DIR:
-        shutil.rmtree(IMG_DIR)
-        os.makedirs(IMG_DIR, exist_ok=True)
+        shutil.rmtree(img_path)
+        os.makedirs(img_path, exist_ok=True)
 
-if not os.path.isdir(LATENT_DIR):
-    os.makedirs(LATENT_DIR, exist_ok=True)
+if not os.path.isdir(latent_path):
+    os.makedirs(latent_path, exist_ok=True)
 # else:
-#     if RESET_LATENT_DIR:
-#         shutil.rmtree(LATENT_DIR)
-#         os.makedirs(LATENT_DIR, exist_ok=True)
+#     if latent_path:
+#         shutil.rmtree(latent_path)
+#         os.makedirs(latent_path, exist_ok=True)
 
-subgoal_dir = os.path.join(LATENT_DIR, "subgoal")
-goal_dir = os.path.join(LATENT_DIR, "goal")
+subgoal_dir = os.path.join(latent_path, "subgoal")
+goal_dir = os.path.join(latent_path, "goal")
 
 if not os.path.isdir(subgoal_dir):
     os.makedirs(subgoal_dir, exist_ok=True)
@@ -512,8 +511,8 @@ def generate_waypoints(
 def compute_stl_loss(
         # obs_imgs: torch.Tensor,
         obs_latents: torch.Tensor,
-        batch_latents: torch.Tensor,
-        goal_latents: torch.Tensor,
+        wp_data: torch.Tensor,
+        goal_data: torch.Tensor,
         device: torch.device,
         models: tuple,
         streams: List,
@@ -525,7 +524,8 @@ def compute_stl_loss(
         threshold: List = SIM_THRESH,  # indicates the sensitivity of satisfaction for similarity distance
 ) -> torch.Tensor:
     """
-    Generates STL formula and inputs for robustness, while computing the STL loss based on robustness.
+    Generates STL formula and inputs for robustness, while computing the STL loss based on robustness. This function
+    assumes that the ViT encoder in the NoMaD model can be learned effectively.
 
     Broadcast each target latent to all latent obs during similarity computation.
     (1) Broadcast target latent to element-wise multiply with obs latents.
@@ -533,8 +533,8 @@ def compute_stl_loss(
 
     Args:
         obs_latents (torch.Tensor): online training observations.
-        batch_latents (torch.Tensor): waypoint latents to perform similarity with + intervals.
-        goal_latents (torch.Tensor): goal latents to perform similarity with.
+        wp_data (torch.Tensor): waypoint latents to perform similarity with + intervals.
+        goal_data (torch.Tensor): goal latents to perform similarity with.
         device (torch.device): device to transfer tensors onto.
         models (tuple): encoder needed for observation latents.
         streams (List): a list of torch.cuda.Stream's instances to deploy runs on a multi-stream setup.
@@ -565,8 +565,8 @@ def compute_stl_loss(
     # )
 
     # unpacking tuple
-    wp_latents = batch_latents[0]
-    intervals = batch_latents[1]
+    wp_latents = wp_data[0]
+    intervals = wp_data[1]
 
     # full expression used for training
     full_exp = None
@@ -585,7 +585,7 @@ def compute_stl_loss(
             curr_stream=stream,
             curr_run=wp_latents[i],
             curr_interval=intervals[i],
-            curr_goal=goal_latents[i],
+            curr_goal=goal_data[i],
             obs_latents=obs_latents,
             threshold=threshold,
             sims=sims,
