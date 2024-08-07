@@ -1,11 +1,17 @@
-# STLVP
+# Neural Signal Temporal Logic Vision Planner (STLVP)
 
 ## Overview
-This codebase implements the neural signal temporal logic vision planner (STLVP). STLVP builds on using signal temporal logic computation graphs (STLCG) for end-to-end visual navigation in robotics, using raw observation image inputs.  
+This codebase implements the STLVP, which is the first framework to integrate signal temporal logic computation graph (STLCG) for end-to-end visual navigation in robotics. STLVP reduces sample complexity in the supervised learning minimization problem and is proven to work more efficiently than optimal policy optimization.  
 
-This repository uses the goal-agnostic and goal-oriented, visuomotor diffusion policy "NoMaD" found in the [NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration](https://github.com/robodhruv/visualnav-transformer/) project.  
+Two pipelines are proposed:  
+  1) The vision pipeline leverages DeepLabV3, StableDiffusion, and MobileViT to propose semantically-segmented subgoals in pixel space and subsequently satisfy STL robustness in latent space.  
+  2) The trajectory pipeline constrains the diffusion model's predicted trajectories with spatio-temporal waypoint specifications.  
 
-Ensure that the STL functions are integrated properly in the training functions involving NoMaD, specifically in train_utils, train_eval_loop, and train.
+We use the [X-Embodiment](https://robotics-transformer-x.github.io/) collaboration dataset ([SACSoN](https://sites.google.com/view/sacson-review/home), [RECON](https://sites.google.com/view/recon-robot/dataset)) to train the policy and generate STL waypoints.  
+
+This project incorporates NoMaD, a visuomotor diffusion policy mapping raw observation image inputs to candidate actions. Published in the ICRA'2024 conference as _[NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration](https://github.com/robodhruv/visualnav-transformer/)_, NoMaD allows for joint policy learning of goal-agnostic and goal-oriented tasks.   
+
+Ensure that the STL functions are integrated properly in the NoMaD training functions, specifically in train_utils, train_eval_loop, and train.py.  
 
 ## Setup
 
