@@ -1,11 +1,21 @@
-# STLVP
+# Neural Signal Temporal Logic Vision Planner (STLVP)
 
 ## Overview
-This codebase implements the neural signal temporal logic vision planner (STLVP). STLVP builds on using signal temporal logic computation graphs (STLCG) for end-to-end visual navigation in robotics, using raw observation image inputs.  
+This codebase implements the neural STLVP, the first framework to integrate signal temporal logic computation graphs (STLCG) for end-to-end visual navigation in robotics.  
+STLVP reduces sample complexity in supervised learning and non-convex minimization problems. It has also been demonstrated to perform more efficiently than traditional optimal policy optimization methods.  
 
-This repository uses the goal-agnostic and goal-oriented, visuomotor diffusion policy "NoMaD" found in the [NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration](https://github.com/robodhruv/visualnav-transformer/) project.  
+### Pipelines: 
+  1) The **vision pipeline** leverages [DeepLabv3](https://arxiv.org/abs/1706.05587), [StableDiffusion](https://github.com/CompVis/stable-diffusion), and [MobileViT](https://arxiv.org/abs/2110.02178) to propose semantically-segmented subgoals in pixel space and satisfy STL robustness in latent space.  
+  2) The **trajectory pipeline** constrains the diffusion model's predicted trajectories with spatio-temporal waypoint specifications.  
 
-Ensure that the STL functions are integrated properly in the training functions involving NoMaD, specifically in train_utils, train_eval_loop, and train.
+## Acknowledgements
+
+This project integrates the PyTorch framework for [STLCG](https://arxiv.org/abs/2008.00097) (WAFR'2020) and the goal-agnostic/oriented diffusion policy in "NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration" (ICRA'2024). NoMaD's architectural details can be viewed in its [repository](https://github.com/robodhruv/visualnav-transformer/).
+
+Ensure that the STL functions are called properly in the NoMaD training objectives, specifically in train_utils, train_eval_loop, and train.py.  
+
+## Dataset
+The [X-Embodiment](https://robotics-transformer-x.github.io/) collaboration dataset is used to train the policy and generate STL waypoints, mainly the [SACSoN](https://sites.google.com/view/sacson-review/home) and [RECON](https://sites.google.com/view/recon-robot/dataset) datasets.  
 
 ## Setup
 
