@@ -58,21 +58,21 @@ def load_models(device: torch.device) -> Tuple:
 
     Args:
         device (`torch.device`):
-            if GPU is not available, use CPU.
+            If GPU is not available, use CPU.
 
     Returns:
-        `tuple` of all models used during the STL creation process.
-        Encoder and text-to-image models are not used for waypoint trajectory generation.
+        `tuple`:
+          All models used during the STL creation process. Encoder and text-to-image models are not used for waypoint
+          generation.
     """
     weights_dir = os.path.join(os.getcwd(), "pretrained_weights")
+    deeplab_dir = os.path.join(weights_dir, "deeplab/best_deeplabv3plus_resnet101_cityscapes_os16.pth.tar")
 
-    deeplab_dir = os.path.join(
-        weights_dir,
-        "deeplab/best_deeplabv3plus_resnet101_cityscapes_os16.pth.tar"
-    )
+    num_classes = 19
+    output_stride = 8
 
     # semantic segmentation model
-    deeplab = modeling.__dict__["deeplabv3plus_resnet101"](num_classes=19, output_stride=8).eval()
+    deeplab = modeling.__dict__["deeplabv3plus_resnet101"](num_classes=num_classes, output_stride=output_stride).eval()
     deeplab.load_state_dict(torch.load(deeplab_dir)["model_state"])
 
     return deeplab.to(device), None, None
@@ -143,15 +143,13 @@ def generate_waypoints(
             subgoal_traj_file = os.path.join(subgoal_dir, f"{idx}.pt")
             goal_traj_file = os.path.join(goal_dir, f"{idx}.pt")
 
-            if process_subgoals:
-                if os.path.isfile(subgoal_traj_file):
-                    print("SKIP")
-                    continue
+            if process_subgoals and os.path.isfile(subgoal_traj_file):
+                print("SKIP")
+                continue
 
-            if process_goals:
-                if os.path.isfile(goal_traj_file):
-                    print("SKIP")
-                    continue
+            if process_goals and os.path.isfile(goal_traj_file):
+                print("SKIP")
+                continue
 
             print(f"Begin processing {idx} batch....")
 
@@ -254,6 +252,7 @@ def predict_start_samples(
     diffusion_output = []
 
     for k in timesteps:
+        # predict x_0 through by re-parametrizing the forward process
         orig_sample = noise_scheduler.step(
             model_output=noise_pred[k],
             sample=noisy_action[k],
@@ -261,6 +260,7 @@ def predict_start_samples(
         ).pred_original_sample
 
         diffusion_output.append(orig_sample)
+    # aggregate each sample in the batch
     diffusion_output = torch.stack(diffusion_output)
 
     # un-normalize the diffusion outputs
@@ -272,6 +272,7 @@ def predict_start_samples(
     diffusion_output = diffusion_output * (action_max - action_min) + action_min
     gc_actions = torch.cumsum(diffusion_output, dim=1)
 
+    # STL RNN cells require torch.float32
     return gc_actions.to(torch.float32)
 
 
@@ -286,8 +287,8 @@ def compute_stl_loss(
         margin: int = 0,  # TODO: change
         visualize_stl: bool = VISUALIZE_STL,
         vis_freq: int = VIS_FREQ,
-        threshold: List = SIM_THRESH,  # indicates the sensitivity of satisfaction for similarity distance
-) -> torch.Tensor:
+        threshold: List = SIM_THRESH,
+) -> Union[None, torch.Tensor]:
     """
     Generates STL formula and inputs for robustness, while computing the STL loss based on robustness.
 
@@ -322,8 +323,8 @@ def compute_stl_loss(
 
     batch_size = 256
     if pred_trajs.size(0) < batch_size:
-        print(f"NOT LARGE ENOUGH: {obs_latents.size()}")
-        return torch.tensor(0.0)
+        print(f"NOT LARGE ENOUGH: {pred_trajs.size()}")
+        return None
 
     start_time = time.time()
 
@@ -342,8 +343,9 @@ def compute_stl_loss(
 
     test_start = time.time()
 
-    print(f"len wp_trajs: {len(wp_trajs)}, len intervals: {len(intervals)}, len pred_trajs: {len(pred_trajs)}")
+    # print(f"len wp_trajs: {len(wp_trajs)}, len intervals: {len(intervals)}, len pred_trajs: {len(pred_trajs)}")
 
+    # processes a multi-stream setup for runs on parallel GPU kernels
     for i, stream in enumerate(streams):
         inner_inputs, inner_exp = process_run(
             curr_stream=stream,
@@ -358,6 +360,7 @@ def compute_stl_loss(
             device=device,
         )
 
+        # full input tuples are not concerned with individual values
         if len(full_inputs) == 0:
             full_inputs = inner_inputs
         else:
@@ -411,8 +414,6 @@ def compute_stl_loss(
 
     flush()
 
-    print(f"STL GRAD FN: {stl_loss.grad_fn}")
-
     return stl_loss
 
 
@@ -429,7 +430,7 @@ def process_run(
         device: torch.device,
 ) -> Tuple[Tuple, stlcg.Expression]:
     """
-    Processes each stream for the current run.
+    Processes each stream for the current run on a GPU kernel.
 
     Args:
         curr_stream (`torch.cuda.Stream`):
@@ -470,8 +471,7 @@ def process_run(
         for j in range(len(curr_run)):
             curr_wp = curr_run[j].to(device)
 
-            # TODO: test if this works, doesn't account for angle
-            # inputs to robustness formula must be torch.float32
+            # map each waypoint to the batch of predicted trajectories
             subgoal_sim = reduce_similarity(F.cosine_similarity(
                 curr_wp.unsqueeze(1).expand(-1, pred_trajs.size(0), -1, -1),
                 pred_trajs.unsqueeze(0).expand(curr_wp.size(0), -1, -1, -1),

@@ -47,12 +47,13 @@ from network import modeling
 
 """
 TODO
-- test sacson/recon, include recon
+- test diffusion loss
+- test objective on recon
 - MSE loss
-- language litreview
+- language lit review
+- make sure each batch is 1 run
 
 - change docs
-- make sure each batch is 1 run
 - parallelize wp generation process, faster text-to-image model
 - lerp, slerp, etc...
 - try leakyrelu
