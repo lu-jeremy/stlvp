@@ -15,7 +15,7 @@ This project integrates the PyTorch framework for [STLCG](https://arxiv.org/abs/
 Ensure that the STL functions are called properly in the NoMaD training objectives, specifically in train_utils, train_eval_loop, and train.py.  
 
 ## Dataset
-The [X-Embodiment](https://robotics-transformer-x.github.io/) collaboration dataset ([SACSoN](https://sites.google.com/view/sacson-review/home), [RECON](https://sites.google.com/view/recon-robot/dataset)) is used to train the policy and generate STL waypoints.  
+The [X-Embodiment](https://robotics-transformer-x.github.io/) collaboration dataset is used to train the policy and generate STL waypoints, mainly the [SACSoN](https://sites.google.com/view/sacson-review/home) and [RECON](https://sites.google.com/view/recon-robot/dataset) datasets.  
 
 ## Setup
 
