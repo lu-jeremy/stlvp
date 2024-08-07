@@ -70,7 +70,7 @@ RUN git clone https://github.com/real-stanford/diffusion_policy.git && \
 
 # PIP
 RUN pip3 install -e diffusion_policy 
-RUN pip3 install git+https://github.com/ChaoningZhang/MobileSAM.git transformers huggingface_hub accelerate
+RUN pip3 install git+https://github.com/ChaoningZhang/MobileSAM.git transformers huggingface_hub accelerate torchviz
 
 # RUN mkdir -p /data/sacson/huron
 

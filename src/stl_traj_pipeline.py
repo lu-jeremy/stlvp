@@ -18,20 +18,13 @@ import os
 import warnings
 import time
 import gc
-import argparse
-import heapq
 import shutil
+
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
 from viz_utils import *
 from text_utils import *
 from constants import *
-
-# meant for MobileViT arch, be aware of real warnings
-warnings.filterwarnings("ignore")
-
-from diffusers import StableDiffusionPipeline
-from transformers import MobileViTModel
-from huggingface_hub import login
 
 sys.path.insert(0, "visualnav-transformer/train")
 from vint_train.data.data_utils import VISUALIZATION_IMAGE_SIZE
@@ -45,15 +38,18 @@ import stlviz as viz
 sys.path.insert(0, "DeepLabV3Plus-Pytorch")
 from network import modeling
 
-"""
-TODO
-- test sacson
-- 
-"""
-
-login(os.getenv("HUGGINGFACE_HUB_TOKEN"))
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:21000"
 sys.setrecursionlimit(10000)  # needed for STL robustness
+
+traj_path = os.path.join(WP_DIR, TRAJ_DIR)
+subgoal_dir = os.path.join(traj_path, "subgoal")
+goal_dir = os.path.join(traj_path, "goal")
+
+if not os.path.isdir(subgoal_dir):
+    os.makedirs(subgoal_dir, exist_ok=True)
+
+if not os.path.isdir(goal_dir):
+    os.makedirs(goal_dir, exist_ok=True)
 
 
 def load_models(device: torch.device) -> Tuple:
@@ -66,6 +62,7 @@ def load_models(device: torch.device) -> Tuple:
 
     Returns:
         `tuple` of all models used during the STL creation process.
+        Encoder and text-to-image models are not used for waypoint trajectory generation.
     """
     weights_dir = os.path.join(os.getcwd(), "pretrained_weights")
 
@@ -78,20 +75,7 @@ def load_models(device: torch.device) -> Tuple:
     deeplab = modeling.__dict__["deeplabv3plus_resnet101"](num_classes=19, output_stride=8).eval()
     deeplab.load_state_dict(torch.load(deeplab_dir)["model_state"])
 
-    mb_vit = MobileViTModel.from_pretrained(
-        "apple/mobilevit-small",
-        cache_dir=os.path.join(weights_dir, "stable_diffusion"),
-        use_auth_token=True).eval()
-
-    # text-to-image models
-    # token_model = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
-    pipe = StableDiffusionPipeline.from_pretrained(
-        "CompVis/stable-diffusion-v1-1",
-        cache_dir=os.path.join(weights_dir, "stable_diffusion"),
-        use_auth_token=True,
-    )
-
-    return deeplab.to(device), mb_vit.to(device), pipe.to(device)
+    return deeplab.to(device), None, None
 
 
 def generate_waypoints(
@@ -147,6 +131,7 @@ def generate_waypoints(
           f"Persistence threshold (Δt): {PERSISTENCE_THRESH}\n" +
           "─" * 10 + "\n")
 
+    # DeepLabV3 preprocessing config
     preprocess = transforms.Compose([
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
@@ -155,16 +140,16 @@ def generate_waypoints(
     if not load_waypoints:
         for idx, data in enumerate(tqdm.tqdm(dataset, desc="Generating waypoints...")):
             # no need to overwrite the same files, skip if detected
-            subgoal_latent_file = os.path.join(subgoal_dir, f"{idx}.pt")
-            goal_latent_file = os.path.join(goal_dir, f"{idx}.pt")
+            subgoal_traj_file = os.path.join(subgoal_dir, f"{idx}.pt")
+            goal_traj_file = os.path.join(goal_dir, f"{idx}.pt")
 
             if process_subgoals:
-                if os.path.isfile(subgoal_latent_file):
+                if os.path.isfile(subgoal_traj_file):
                     print("SKIP")
                     continue
 
             if process_goals:
-                if os.path.isfile(goal_latent_file):
+                if os.path.isfile(goal_traj_file):
                     print("SKIP")
                     continue
 
@@ -184,124 +169,123 @@ def generate_waypoints(
 
             obs_imgs = torch.split(obs_imgs, 3, dim=1)
 
-            # process images to latent vectors
-            if process_subgoals:
-                # obs are resized in terms of how MobileViT dimensions are calculated
-                obs_imgs = [preprocess(img) for img in obs_imgs]
-                obs_imgs = torch.stack(obs_imgs)[-1].to(device)  # TODO: see if taking more images suffices
+            obs_imgs = [preprocess(img) for img in obs_imgs]
+            obs_imgs = torch.stack(obs_imgs)[-1].to(device)
 
-                # process obs latents
-                seg_model, _, _ = models
+            # retrieve intervals based on segmentation maps
+            seg_model, _, _ = models
 
-                with torch.no_grad():
-                    outputs = seg_model(obs_imgs)
+            with torch.no_grad():
+                outputs = seg_model(obs_imgs)
 
-                preds, intervals = filter_preds(outputs, data_pos)
+            _, trajs, intervals = filter_preds(outputs, actions)
 
-                # we cannot continue process if there are no valid waypoints
-                if len(preds) == 0:
-                    print("Found no predictions, skipping...")
-                    return
+            # we cannot continue process if there are no valid waypoints
+            if len(intervals) == 0:
+                # trajs are not saved for maps with no predictions
+                print("Found no predictions, skipping...")
+                continue
 
+            assert len(trajs) == len(intervals)
 
+            print(f"LEN TRAJ: {len(trajs)}, LEN INTERVALS: {len(intervals)}")
 
-                # print(f"shape of returned z batch: {len(z_batch[0])}, {len(z_batch[1])}")
+            # save traj and intervals to dir
+            torch.save((trajs, intervals), subgoal_traj_file)
+            # TODO
+            # torch.save(, goal_traj_file)
 
-                # if z_batch is not None:
-                #     torch.save(z_batch, subgoal_latent_file)
-                #     print("Successfully saved waypoint latents!")
-                #
-                #     if enable_intervals:
-                #         assert len(z_batch[0]) == len(z_batch[1])
-
-                # del obs_imgs, z_batch
-                # flush()
-
-            if process_goals:
-                # process goal latents, TODO CHECK IF THIS WORKS
-                goal_imgs = [preprocess(img) for img in goal_img]
-                goal_imgs = torch.stack(goal_imgs)
-
-                z_goal = generate_latents_from_obs(
-                    mode="goal",
-                    obs_imgs=goal_imgs,
-                    models=models,
-                    device=device,
-                    data_pos=0,
-                    visualize_subgoals=visualize_subgoals,
-                    enable_intervals=enable_intervals,
-                )
-
-                if z_goal is not None:
-                    torch.save(z_goal, goal_latent_file)
-                    print("Successfully saved goal latents!")
-
-                del goal_imgs, z_goal
-                flush()
-
-            # just to be safe
-            del obs_imgs, data
-            flush()
-
-            # print("END OF LOOP\n", torch.cuda.memory_summary())
             print("ELAPSED TIME: %.2f s." % (time.time() - start_time))
 
         # torch.save(z_batch, latent_file)
         print("Finished saving waypoint latents!")
 
-        # TODO: Program doesn't need to continue at this point
+        # program doesn't need to continue at this point
         sys.exit()
     else:
         if enable_intervals:
             # z_w = None
             # intervals = None
-            z_w = []
+            w_traj = []
             intervals = []
-            z_g = []
+            g_traj = []
 
             # subgoal takes priority, as some preds are skipped during processing
             for root, dirs, files in os.walk(subgoal_dir):
                 for f in tqdm.tqdm(files, "Loading waypoints..."):
                     batch = torch.load(os.path.join(root, f))
 
-                    z_w.append(batch[0])
+                    assert isinstance(batch[0][0], torch.Tensor), "Traj is not a tensor"
+
+                    w_traj.append(batch[0])
                     intervals.append(batch[1])
 
-                    # add matching latent file with subgoal
-                    batch = torch.load(os.path.join(goal_dir, f))
-                    z_g.append(batch)
-
-                    # if z_w is None:
-                    #     z_w = batch[0]
-                    #     intervals = batch[1]
-                    # else:
-                    #     z_w = torch.cat((z_w, batch[0]))
-                    #     intervals = np.concatenate((intervals, batch[1]))
+                    # TODO: add goals
+                    # # add matching latent file with subgoal
+                    # batch = torch.load(os.path.join(goal_dir, f))
+                    # z_g.append(batch)
 
             print(f"Successfully loaded waypoint latents!\n"
-                  f"# wp: {len(z_w)}, # intervals: {len(intervals)}, # goals: {len(z_g)}\n")
+                  f"# wp: {len(w_traj)}, # intervals: {len(intervals)}, # goals: {len(g_traj)}\n")
 
-            assert len(z_w) == len(intervals) and len(intervals) == len(z_g),\
+            assert len(w_traj) == len(intervals),\
                 "The number of subgoal/goal latent files do not match."
 
-            # print(f"Successfully loaded waypoint latents! Shapes: {z_w.shape}, {intervals.shape}")
+            return (w_traj, intervals), None  # TODO goals
 
-            return (z_w, intervals), z_g
+
+def predict_start_samples(
+        noisy_action: torch.Tensor,
+        noise_pred: torch.Tensor,
+        timesteps: torch.IntTensor,
+        noise_scheduler: DDPMScheduler,
+        action_stats: dict,
+        device: torch.device,
+):
+    """
+    Predicts x_0 based on batches of noise predictions and current diffused x_t's on uniformly distributed
+    timesteps.
+
+    Returns:
+        `torch.tensor`:
+            The predicted, un-normalized goal-conditioned actions for the batch.
+    """
+    # denoise noisy action based on pred noise, TODO add this to stl loss function
+    diffusion_output = []
+
+    for k in timesteps:
+        orig_sample = noise_scheduler.step(
+            model_output=noise_pred[k],
+            sample=noisy_action[k],
+            timestep=k,
+        ).pred_original_sample
+
+        diffusion_output.append(orig_sample)
+    diffusion_output = torch.stack(diffusion_output)
+
+    # un-normalize the diffusion outputs
+    action_max = torch.from_numpy(action_stats["max"]).to(device)
+    action_min = torch.from_numpy(action_stats["min"]).to(device)
+
+    diffusion_output = diffusion_output.reshape(diffusion_output.shape[0], -1, 2)
+    diffusion_output = (diffusion_output + 1) / 2
+    diffusion_output = diffusion_output * (action_max - action_min) + action_min
+    gc_actions = torch.cumsum(diffusion_output, dim=1)
+
+    return gc_actions.to(torch.float32)
 
 
 def compute_stl_loss(
-        # obs_imgs: torch.Tensor,
-        obs_latents: torch.Tensor,
-        batch_latents: torch.Tensor,
-        goal_latents: torch.Tensor,
+        pred_trajs: torch.Tensor,
+        wp_data: torch.Tensor,
+        goal_data: torch.Tensor,
         device: torch.device,
-        models: tuple,
         streams: List,
         dataset_idx: int,
+        action_mask: torch.Tensor,
         margin: int = 0,  # TODO: change
-        enable_intervals: bool = ENABLE_INTERVALS,
         visualize_stl: bool = VISUALIZE_STL,
-        viz_freq: int = 50,
+        vis_freq: int = VIS_FREQ,
         threshold: List = SIM_THRESH,  # indicates the sensitivity of satisfaction for similarity distance
 ) -> torch.Tensor:
     """
@@ -312,11 +296,11 @@ def compute_stl_loss(
     (2) Broadcast obs latent to each target.
 
     Args:
-        obs_latents (`torch.Tensor`):
+        pred_trajs (`torch.Tensor`):
             Online training observations.
-        batch_latents (`torch.Tensor`):
+        wp_data (`torch.Tensor`):
             Waypoint latents to perform similarity with + intervals.
-        goal_latents (`torch.Tensor`):
+        goal_data (`torch.Tensor`):
             Goal latents to perform similarity with.
         device (`torch.device`):
             Device to transfer tensors onto.
@@ -324,13 +308,11 @@ def compute_stl_loss(
             Encoder for observation latents.
         streams (`List`):
             List of torch.cuda.Stream's instances to deploy runs on a multi-stream setup.
-        margin (`int`):
+        margin (`int`, defaults to 0):
            Margin in the ReLU objective.
-        enable_intervals (`bool`):
-            Determines the inclusion of intervals in encoding process.
-        visualize_stl (`bool`):
+        visualize_stl (`bool`, defaults to `VISUALIZE_STL`):
             Determines the STL formula visualization.
-        threshold (`List`):
+        threshold (`List`, defaults to `SIM_THRESH`):
             Threshold values for STL similarity expressions.
     Returns:
         `torch.Tensor`:
@@ -339,25 +321,16 @@ def compute_stl_loss(
     flush()
 
     batch_size = 256
-    if obs_latents.size(0) < batch_size:
+    if pred_trajs.size(0) < batch_size:
         print(f"NOT LARGE ENOUGH: {obs_latents.size()}")
         return torch.tensor(0.0)
 
     start_time = time.time()
 
-    # don't need intervals for observation latents
-    # obs_latents = generate_latents_from_obs(
-    #     mode="training",
-    #     obs_imgs=obs_imgs,
-    #     models=models,
-    #     device=device,
-    #     enable_intervals=enable_intervals,
-    #     visualize_subgoals=False,
-    # )
-
     # unpacking tuple
-    wp_latents = batch_latents[0]
-    intervals = batch_latents[1]
+    wp_trajs = wp_data[0]
+    intervals = wp_data[1]
+    goal_trajs = goal_data
 
     # full expression used for training
     full_exp = None
@@ -369,38 +342,26 @@ def compute_stl_loss(
 
     test_start = time.time()
 
-    print(f"len wp latents: {len(wp_latents)}, len intervals: {len(intervals)}, len obs latents: {len(obs_latents)}")
+    print(f"len wp_trajs: {len(wp_trajs)}, len intervals: {len(intervals)}, len pred_trajs: {len(pred_trajs)}")
 
     for i, stream in enumerate(streams):
         inner_inputs, inner_exp = process_run(
             curr_stream=stream,
-            curr_run=wp_latents[i],
+            curr_run=wp_trajs[i],
             curr_interval=intervals[i],
-            curr_goal=goal_latents[i],
-            obs_latents=obs_latents,
+            # curr_goal=goal_trajs[i],
+            pred_trajs=pred_trajs,
             threshold=threshold,
             sims=sims,
             annots=annots,
+            action_mask=action_mask,
+            device=device,
         )
 
-        # print(inner_inputs)
-        # print(full_inputs)
-        #
-        # print(len(inner_inputs))
-        # print(len(full_inputs))
-
-        # recursively add inner inputs to full inputs
         if len(full_inputs) == 0:
             full_inputs = inner_inputs
-        # elif len(full_inputs) == 1:
-        #     full_inputs = (*full_inputs, inner_inputs)
-        # # if len(full_inputs) <= 1:
-        # #     full_inputs = (*full_inputs, inner_inputs)
         else:
             full_inputs = (full_inputs, inner_inputs)
-
-        # print(full_inputs)
-        # print(len(full_inputs))
 
         # recursively add inner exp to full exp
         if full_exp is None:
@@ -408,14 +369,12 @@ def compute_stl_loss(
         else:
             full_exp |= inner_exp
 
-    # print(full_exp)
-    # print(full_inputs)
-
     for stream in streams:
         stream.synchronize()
 
     if VISUALIZE_SIM:
-        if dataset_idx % viz_freq == 0:
+        if dataset_idx % vis_freq == 0:
+            # sims = [sim.mean() for sim in sims[:20]]
             sims = sims[:20]
             annots = annots[:20]
 
@@ -430,7 +389,7 @@ def compute_stl_loss(
 
             ax.set_xlabel("Time")
             ax.set_ylabel("Similarity Metrics")
-            plt.title(f"{len(wp_latents)} Runs, 1 Training Iteration")
+            plt.title(f"{len(wp_trajs)} Runs, 1 Training Iteration")
             plt.savefig(os.path.join(IMG_DIR, f"run_{dataset_idx}.png"))
 
         print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
@@ -452,6 +411,8 @@ def compute_stl_loss(
 
     flush()
 
+    print(f"STL GRAD FN: {stl_loss.grad_fn}")
+
     return stl_loss
 
 
@@ -459,11 +420,13 @@ def process_run(
         curr_stream: torch.cuda.Stream,
         curr_run: torch.Tensor,
         curr_interval: List,
-        curr_goal: torch.Tensor,
-        obs_latents: torch.Tensor,
+        # curr_goal: torch.Tensor,
+        pred_trajs: torch.Tensor,
         threshold: List,
         sims: List,
         annots: List,
+        action_mask: torch.Tensor,
+        device: torch.device,
 ) -> Tuple[Tuple, stlcg.Expression]:
     """
     Processes each stream for the current run.
@@ -477,8 +440,8 @@ def process_run(
             The current run's interval to process.
         curr_goal (`torch.Tensor`):
             The current run's goal to process.
-        obs_latents (`torch.Tensor`):
-            All observation latents to perform comparison with.
+        pred_trajs (`torch.Tensor`):
+            The policy's predicted trajectories to perform comparison with.
         threshold (`List`):
             Threshold values for STL similarity expressions.
         sims (`List`):
@@ -490,34 +453,30 @@ def process_run(
         `Tuple`:
             The current inputs and STL expression for the current run.
     """
+    def reduce_similarity(similarity: torch.Tensor):
+        """
+        Reduces actions to 1D value.
+        """
+        while similarity.dim() > 1:
+            similarity = similarity.mean(dim=-1)
+
+        return similarity.mean()
+        # return (similarity * action_mask).mean() / (action_mask.mean() + 1e-2)
+
     with torch.cuda.stream(curr_stream):
         inner_exp = None
         inner_inputs = ()
 
-        # loop_start = time.time()
-
         for j in range(len(curr_run)):
-            # inner_start = time.time()
+            curr_wp = curr_run[j].to(device)
 
-            # transform latents to match obs condition vector for similarity computation
-            curr_wp = curr_run[j].reshape(-1, obs_latents.size(0))  # (160, 256)
-            # simple computation purposes, linear interpolation
-            # weights = (torch.ones(len(curr_wp), device=curr_wp.device) / len(curr_wp)).view(1, -1)
-            # curr_wp = weights @ curr_wp
-
-            # compute subgoal similarity and convert to valid STL input
-            subgoal_sim = F.cosine_similarity(
-                # curr_wp.unsqueeze(0).expand(obs_latents.size(0), -1),
-                # curr_wp.expand(obs_latents.size(0), -1),
-                # obs_latents,
-                curr_wp.unsqueeze(1).expand(-1, obs_latents.size(0), -1),
-                obs_latents.unsqueeze(0).expand(curr_wp.size(0), -1, -1),
-                dim=-1
-            ).mean().unsqueeze(0).unsqueeze(0).unsqueeze(0)
-
-            # print("SUBGOAL", subgoal_sim)
-
-            # print(inner_inputs)
+            # TODO: test if this works, doesn't account for angle
+            # inputs to robustness formula must be torch.float32
+            subgoal_sim = reduce_similarity(F.cosine_similarity(
+                curr_wp.unsqueeze(1).expand(-1, pred_trajs.size(0), -1, -1),
+                pred_trajs.unsqueeze(0).expand(curr_wp.size(0), -1, -1, -1),
+                dim=-1,
+            )).unsqueeze(0).unsqueeze(0).unsqueeze(0)
 
             # for visualization
             sims.append(to_numpy(subgoal_sim).flatten())
@@ -526,16 +485,8 @@ def process_run(
             # recursively add subgoal metric to inner inputs
             if len(inner_inputs) == 0:
                 inner_inputs = subgoal_sim
-            # elif len(inner_inputs) == 1:
-            #     inner_inputs = (*inner_inputs, subgoal_sim)
             else:
                 inner_inputs = (inner_inputs, subgoal_sim)
-
-            # print(inner_inputs)
-
-            # sys.exit()
-
-            # print(f"time after subgoal: {time.time() - inner_start}")
 
             # access the current interval
             interv = curr_interval[j]
@@ -551,6 +502,5 @@ def process_run(
                 inner_exp = subgoal_sim
             else:
                 inner_exp &= subgoal_sim  # test AND vs OR
-
 
     return inner_inputs, inner_exp

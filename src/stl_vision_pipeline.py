@@ -47,6 +47,11 @@ from network import modeling
 
 """
 TODO
+- test sacson/recon, include recon
+- MSE loss
+- language litreview
+
+- change docs
 - make sure each batch is 1 run
 - parallelize wp generation process, faster text-to-image model
 - lerp, slerp, etc...
@@ -172,7 +177,7 @@ def generate_latents_from_obs(
         with torch.no_grad():
             outputs = seg_model(obs_imgs)
 
-        preds, intervals = filter_preds(outputs, data_pos)
+        preds, _, intervals = filter_preds(outputs, data_pos)
 
         # we cannot continue process if there are no valid waypoints
         if len(preds) == 0:

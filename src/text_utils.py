@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 from collections import namedtuple
 import gc
 
@@ -72,30 +72,42 @@ def valid_landmark(preds_unique: np.ndarray, num_thresh: int, object_landmarks: 
     return len(in_landmarks) != 0
 
 
-def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[List, np.ndarray]:
+def filter_preds(
+        outputs: np.ndarray,
+        actions: Optional[torch.Tensor] = None,
+        data_pos: int = 0,
+) -> Tuple[List, List, np.ndarray]:
     """
     Filters predictions based on criteria, used for text-to-image subgoal generation.
 
     Args:
-        outputs (np.ndarray): raw outputs of semantic segmentation model.
-        data_pos (int): dataset position in loading loop.
+        outputs (`np.ndarray`):
+            Raw outputs of semantic segmentation model.
+        actions (`torch.Tensor`, *optional*):
+            Ground-truth 2D action trajectories for the current run.
+        data_pos (`int`):
+            Dataset position in loading loop.
 
     Returns:
-        (preds, intervals) (tuple):
-            a list of prompts for the text-to-image model and corresponding intervals array for each image.
+        `tuple`:
+            Contains a list of prompts for the text-to-image model, corresponding intervals for each subgoal, and
+            a list of trajectories for each waypoint.
     """
+    # in the case that trajs are not used
+    if actions is None:
+        actions = []
+
     # return the max probability for each image
     preds = outputs.max(1)[1].detach().cpu().numpy()
     preds[preds == 255] = 19
     # format of image doesn't matter, flatten
     preds = preds.reshape(preds.shape[0], -1)
 
-    assert (preds.shape == (256, 96 ** 2))
-
     preds_comb = [np.unique(p, return_counts=True)
                   for p in preds]
 
     # filter out predictions
+    trajs = []
     preds = []
     intervals = []
 
@@ -132,6 +144,9 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[List, np.ndarray]:
                     # if robot sees object for only a couple frames, it's not good grounds to include it as a landmark
                     intervals.append([start, end])
                     preds.append(curr_pred)
+                    trajs.append(actions[start: end + 1])
+
+                    assert intervals[0][1] - intervals[0][0] == len(trajs[0]) - 1
                     # preds.append(curr_lm)  # for now, add full prediction after filtering
 
                 # next iteration, update with an valid landmark or skip
@@ -193,7 +208,9 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[List, np.ndarray]:
                 print(f"Good landmark -> final interval: [{start}, {end}]")
                 intervals.append([start, end])
                 preds.append(curr_pred)
-                # preds.append(curr_lm)  # for now, add full prediction after filtering
+                trajs.append(actions[start: end + 1])
+
+                assert intervals[0][1] - intervals[0][0] == len(trajs[0]) - 1
 
             # update current landmark if they're different
             curr_lm = lm_id
@@ -219,7 +236,7 @@ def filter_preds(outputs: np.ndarray, data_pos: int) -> Tuple[List, np.ndarray]:
     print("PROMPTS:", preds)
     print(f"NUM IMAGES/PROMPTS: {len(preds)}")
 
-    return preds, intervals
+    return preds, trajs, intervals
 
 
 def visualize_segmentation(obs_imgs: torch.Tensor, unnormalized_preds: np.ndarray):
