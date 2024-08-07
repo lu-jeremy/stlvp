@@ -52,30 +52,275 @@ if not os.path.isdir(goal_dir):
     os.makedirs(goal_dir, exist_ok=True)
 
 
-def load_models(device: torch.device) -> Tuple:
+def process_run(
+        curr_stream: torch.cuda.Stream,
+        curr_run: torch.Tensor,
+        curr_interval: List,
+        # curr_goal: torch.Tensor,
+        pred_trajs: torch.Tensor,
+        threshold: List,
+        sims: List,
+        annots: List,
+        action_mask: torch.Tensor,
+        device: torch.device,
+) -> Tuple[Tuple, stlcg.Expression]:
     """
-    Loads the pre-trained ViT models onto the specified device.
+    Processes each stream for the current run on a GPU kernel. Constructs an STL formula for each run, which is to be
+    concatenated into the full expression in the compute_stl_loss function.
 
     Args:
-        device (`torch.device`):
-            If GPU is not available, use CPU.
+        curr_stream (`torch.cuda.Stream`):
+            An instance of the torch.cuda.Stream class.
+        curr_run (`torch.Tensor`):
+            The current run's waypoints to process.
+        curr_interval (`List`):
+            The current run's interval to process.
+        curr_goal (`torch.Tensor`):
+            The current run's goal to process.
+        pred_trajs (`torch.Tensor`):
+            The policy's predicted trajectories to perform comparison with.
+        threshold (`List`):
+            Threshold values for STL similarity expressions.
+        sims (`List`):
+            List of similarity metrics to visualize.
+        annots (`List`):
+            List of annotations to visualize.
 
     Returns:
-        `tuple`:
-          All models used during the STL creation process. Encoder and text-to-image models are not used for waypoint
-          generation.
+        `Tuple`:
+            The current inputs and STL expression for the current run.
     """
-    weights_dir = os.path.join(os.getcwd(), "pretrained_weights")
-    deeplab_dir = os.path.join(weights_dir, "deeplab/best_deeplabv3plus_resnet101_cityscapes_os16.pth.tar")
 
-    num_classes = 19
-    output_stride = 8
+    def reduce_similarity(similarity: torch.Tensor):
+        """
+        Reduces similarity metrics to one-dimensional values.
+        """
+        while similarity.dim() > 1:
+            similarity = similarity.mean(dim=-1)
 
-    # semantic segmentation model
-    deeplab = modeling.__dict__["deeplabv3plus_resnet101"](num_classes=num_classes, output_stride=output_stride).eval()
-    deeplab.load_state_dict(torch.load(deeplab_dir)["model_state"])
+        return similarity.mean()
+        # return (similarity * action_mask).mean() / (action_mask.mean() + 1e-2)
 
-    return deeplab.to(device), None, None
+    with torch.cuda.stream(curr_stream):
+        inner_exp = None
+        inner_inputs = ()
+
+        for j in range(len(curr_run)):
+            curr_wp = curr_run[j].to(device)
+
+            # map each waypoint to the batch of predicted trajectories
+            subgoal_sim = reduce_similarity(F.cosine_similarity(
+                curr_wp.unsqueeze(1).expand(-1, pred_trajs.size(0), -1, -1),
+                pred_trajs.unsqueeze(0).expand(curr_wp.size(0), -1, -1, -1),
+                dim=-1,
+            )).unsqueeze(0).unsqueeze(0).unsqueeze(0)
+
+            # for visualization
+            sims.append(to_numpy(subgoal_sim).flatten())
+            annots.append(f"w_{len(sims)}")
+
+            # recursively add subgoal metric to inner inputs
+            if len(inner_inputs) == 0:
+                inner_inputs = subgoal_sim
+            else:
+                inner_inputs = (inner_inputs, subgoal_sim)
+
+            # access the current interval
+            interv = curr_interval[j]
+
+            # add subgoal to STL formula
+            subgoal_sim = stlcg.Eventually(
+                stlcg.Expression("phi_ij", subgoal_sim) > threshold[0],
+                interval=[interv[0], interv[1]]
+            )
+
+            # recursively add subgoal exp to inner exp
+            if inner_exp is None:
+                inner_exp = subgoal_sim
+            else:
+                inner_exp &= subgoal_sim  # test AND vs OR
+
+    return inner_inputs, inner_exp
+
+
+def compute_stl_loss(
+        pred_trajs: torch.Tensor,
+        wp_data: torch.Tensor,
+        goal_data: torch.Tensor,
+        device: torch.device,
+        streams: List,
+        dataset_idx: int,
+        action_mask: torch.Tensor,
+        margin: int = 0,  # TODO: change
+        visualize_stl: bool = VISUALIZE_STL,
+        vis_freq: int = VIS_FREQ,
+        threshold: List = SIM_THRESH,
+) -> Union[None, torch.Tensor]:
+    """
+    Generates STL formula and inputs for robustness, while computing the STL loss based on robustness.
+
+    Broadcast each target latent to all latent obs during similarity computation.
+    (1) Broadcast target latent to element-wise multiply with obs latents.
+    (2) Broadcast obs latent to each target.
+
+    Args:
+        pred_trajs (`torch.Tensor`):
+            Online training observations.
+        wp_data (`torch.Tensor`):
+            Waypoint latents to perform similarity with + intervals.
+        goal_data (`torch.Tensor`):
+            Goal latents to perform similarity with.
+        device (`torch.device`):
+            Device to transfer tensors onto.
+        models (`tuple`):
+            Encoder for observation latents.
+        streams (`List`):
+            List of torch.cuda.Stream's instances to deploy runs on a multi-stream setup.
+        margin (`int`, defaults to 0):
+           Margin in the ReLU objective.
+        visualize_stl (`bool`, defaults to `VISUALIZE_STL`):
+            Determines the STL formula visualization.
+        threshold (`List`, defaults to `SIM_THRESH`):
+            Threshold values for STL similarity expressions.
+    Returns:
+        `torch.Tensor`:
+            The computed STL loss with no loss weight.
+    """
+    flush()
+
+    batch_size = 256
+    if pred_trajs.size(0) < batch_size:
+        print(f"NOT LARGE ENOUGH: {pred_trajs.size()}")
+        return None
+
+    start_time = time.time()
+
+    # unpacking tuple
+    wp_trajs = wp_data[0]
+    intervals = wp_data[1]
+    goal_trajs = goal_data
+
+    # full expression used for training
+    full_exp = None
+    # signal inputs to the robustness function
+    full_inputs = ()
+    # used for similarity visualization
+    sims = []
+    annots = []
+
+    test_start = time.time()
+
+    # processes a multi-stream setup for runs on parallel GPU kernels
+    for i, stream in enumerate(streams):
+        inner_inputs, inner_exp = process_run(
+            curr_stream=stream,
+            curr_run=wp_trajs[i],
+            curr_interval=intervals[i],
+            # curr_goal=goal_trajs[i],
+            pred_trajs=pred_trajs,
+            threshold=threshold,
+            sims=sims,
+            annots=annots,
+            action_mask=action_mask,
+            device=device,
+        )
+
+        # full input tuples are not concerned with individual values
+        if len(full_inputs) == 0:
+            full_inputs = inner_inputs
+        else:
+            full_inputs = (full_inputs, inner_inputs)
+
+        # recursively add inner exp to full exp
+        if full_exp is None:
+            full_exp = inner_exp
+        else:
+            full_exp |= inner_exp
+
+    for stream in streams:
+        stream.synchronize()
+
+    if VISUALIZE_SIM:
+        if dataset_idx % vis_freq == 0:
+            sims = sims[:20]
+            annots = annots[:20]
+
+            fig, ax = plt.subplots()
+            x = range(0, len(sims) * 100, 100)
+            ax.plot(x, sims, marker='o', linestyle='-', label='Similarities')
+
+            for i, a in enumerate(annots):
+                ax.annotate(a, (x[i], sims[i]))
+
+            ax.set_xlabel("Time")
+            ax.set_ylabel("Similarity Metrics")
+            plt.title(f"{len(wp_trajs)} Runs, 1 Training Iteration")
+            plt.savefig(os.path.join(IMG_DIR, f"run_{dataset_idx}.png"))
+
+        print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
+
+    if full_exp is None:
+        raise ValueError(f"Formula is not properly defined.")
+
+    # saves a digraph of the STL formula
+    if visualize_stl:
+        digraph = viz.make_stl_graph(full_exp)
+        viz.save_graph(digraph, "utils/formula")
+        print("Saved formula CG successfully.")
+
+    # recursive depth may result in overloading stack memory
+    robustness = (-full_exp.robustness(full_inputs)).squeeze()
+    stl_loss = torch.relu(robustness - margin).mean()
+
+    print(f"STL loss: {stl_loss}, \tSTL Computation Time (s): {time.time() - start_time}")
+
+    flush()
+
+    return stl_loss
+
+
+def predict_start_samples(
+        noisy_action: torch.Tensor,
+        noise_pred: torch.Tensor,
+        timesteps: torch.IntTensor,
+        noise_scheduler: DDPMScheduler,
+        action_stats: dict,
+        device: torch.device,
+):
+    """
+    Predicts x_0 based on batches of noise predictions and current diffused x_t's on uniformly distributed
+    timesteps.
+
+    Returns:
+        `torch.tensor`:
+            The predicted, un-normalized goal-conditioned actions for the batch.
+    """
+    # denoise noisy action based on pred noise, TODO add this to stl loss function
+    diffusion_output = []
+
+    for k in timesteps:
+        # predict x_0 through by re-parametrizing the forward process
+        orig_sample = noise_scheduler.step(
+            model_output=noise_pred[k],
+            sample=noisy_action[k],
+            timestep=k,
+        ).pred_original_sample
+
+        diffusion_output.append(orig_sample)
+    # aggregate each sample in the batch
+    diffusion_output = torch.stack(diffusion_output)
+
+    # un-normalize the diffusion outputs
+    action_max = torch.from_numpy(action_stats["max"]).to(device)
+    action_min = torch.from_numpy(action_stats["min"]).to(device)
+
+    diffusion_output = diffusion_output.reshape(diffusion_output.shape[0], -1, 2)
+    diffusion_output = (diffusion_output + 1) / 2
+    diffusion_output = diffusion_output * (action_max - action_min) + action_min
+    gc_actions = torch.cumsum(diffusion_output, dim=1)
+
+    # STL RNN cells require torch.float32
+    return gc_actions.to(torch.float32)
 
 
 def generate_waypoints(
@@ -196,7 +441,7 @@ def generate_waypoints(
             print("ELAPSED TIME: %.2f s." % (time.time() - start_time))
 
         # torch.save(z_batch, latent_file)
-        print("Finished saving waypoint latents!")
+        print("Finished saving waypoints!")
 
         # program doesn't need to continue at this point
         sys.exit()
@@ -223,7 +468,7 @@ def generate_waypoints(
                     # batch = torch.load(os.path.join(goal_dir, f))
                     # z_g.append(batch)
 
-            print(f"Successfully loaded waypoint latents!\n"
+            print(f"Successfully loaded waypoints!\n"
                   f"# wp: {len(w_traj)}, # intervals: {len(intervals)}, # goals: {len(g_traj)}\n")
 
             assert len(w_traj) == len(intervals),\
@@ -232,275 +477,27 @@ def generate_waypoints(
             return (w_traj, intervals), None  # TODO goals
 
 
-def predict_start_samples(
-        noisy_action: torch.Tensor,
-        noise_pred: torch.Tensor,
-        timesteps: torch.IntTensor,
-        noise_scheduler: DDPMScheduler,
-        action_stats: dict,
-        device: torch.device,
-):
+def load_models(device: torch.device) -> Tuple:
     """
-    Predicts x_0 based on batches of noise predictions and current diffused x_t's on uniformly distributed
-    timesteps.
-
-    Returns:
-        `torch.tensor`:
-            The predicted, un-normalized goal-conditioned actions for the batch.
-    """
-    # denoise noisy action based on pred noise, TODO add this to stl loss function
-    diffusion_output = []
-
-    for k in timesteps:
-        # predict x_0 through by re-parametrizing the forward process
-        orig_sample = noise_scheduler.step(
-            model_output=noise_pred[k],
-            sample=noisy_action[k],
-            timestep=k,
-        ).pred_original_sample
-
-        diffusion_output.append(orig_sample)
-    # aggregate each sample in the batch
-    diffusion_output = torch.stack(diffusion_output)
-
-    # un-normalize the diffusion outputs
-    action_max = torch.from_numpy(action_stats["max"]).to(device)
-    action_min = torch.from_numpy(action_stats["min"]).to(device)
-
-    diffusion_output = diffusion_output.reshape(diffusion_output.shape[0], -1, 2)
-    diffusion_output = (diffusion_output + 1) / 2
-    diffusion_output = diffusion_output * (action_max - action_min) + action_min
-    gc_actions = torch.cumsum(diffusion_output, dim=1)
-
-    # STL RNN cells require torch.float32
-    return gc_actions.to(torch.float32)
-
-
-def compute_stl_loss(
-        pred_trajs: torch.Tensor,
-        wp_data: torch.Tensor,
-        goal_data: torch.Tensor,
-        device: torch.device,
-        streams: List,
-        dataset_idx: int,
-        action_mask: torch.Tensor,
-        margin: int = 0,  # TODO: change
-        visualize_stl: bool = VISUALIZE_STL,
-        vis_freq: int = VIS_FREQ,
-        threshold: List = SIM_THRESH,
-) -> Union[None, torch.Tensor]:
-    """
-    Generates STL formula and inputs for robustness, while computing the STL loss based on robustness.
-
-    Broadcast each target latent to all latent obs during similarity computation.
-    (1) Broadcast target latent to element-wise multiply with obs latents.
-    (2) Broadcast obs latent to each target.
+    Loads the pre-trained ViT models onto the specified device.
 
     Args:
-        pred_trajs (`torch.Tensor`):
-            Online training observations.
-        wp_data (`torch.Tensor`):
-            Waypoint latents to perform similarity with + intervals.
-        goal_data (`torch.Tensor`):
-            Goal latents to perform similarity with.
         device (`torch.device`):
-            Device to transfer tensors onto.
-        models (`tuple`):
-            Encoder for observation latents.
-        streams (`List`):
-            List of torch.cuda.Stream's instances to deploy runs on a multi-stream setup.
-        margin (`int`, defaults to 0):
-           Margin in the ReLU objective.
-        visualize_stl (`bool`, defaults to `VISUALIZE_STL`):
-            Determines the STL formula visualization.
-        threshold (`List`, defaults to `SIM_THRESH`):
-            Threshold values for STL similarity expressions.
-    Returns:
-        `torch.Tensor`:
-            The computed STL loss with no loss weight.
-    """
-    flush()
-
-    batch_size = 256
-    if pred_trajs.size(0) < batch_size:
-        print(f"NOT LARGE ENOUGH: {pred_trajs.size()}")
-        return None
-
-    start_time = time.time()
-
-    # unpacking tuple
-    wp_trajs = wp_data[0]
-    intervals = wp_data[1]
-    goal_trajs = goal_data
-
-    # full expression used for training
-    full_exp = None
-    # signal inputs to the robustness function
-    full_inputs = ()
-    # used for similarity visualization
-    sims = []
-    annots = []
-
-    test_start = time.time()
-
-    # print(f"len wp_trajs: {len(wp_trajs)}, len intervals: {len(intervals)}, len pred_trajs: {len(pred_trajs)}")
-
-    # processes a multi-stream setup for runs on parallel GPU kernels
-    for i, stream in enumerate(streams):
-        inner_inputs, inner_exp = process_run(
-            curr_stream=stream,
-            curr_run=wp_trajs[i],
-            curr_interval=intervals[i],
-            # curr_goal=goal_trajs[i],
-            pred_trajs=pred_trajs,
-            threshold=threshold,
-            sims=sims,
-            annots=annots,
-            action_mask=action_mask,
-            device=device,
-        )
-
-        # full input tuples are not concerned with individual values
-        if len(full_inputs) == 0:
-            full_inputs = inner_inputs
-        else:
-            full_inputs = (full_inputs, inner_inputs)
-
-        # recursively add inner exp to full exp
-        if full_exp is None:
-            full_exp = inner_exp
-        else:
-            full_exp |= inner_exp
-
-    for stream in streams:
-        stream.synchronize()
-
-    if VISUALIZE_SIM:
-        if dataset_idx % vis_freq == 0:
-            # sims = [sim.mean() for sim in sims[:20]]
-            sims = sims[:20]
-            annots = annots[:20]
-
-            fig, ax = plt.subplots()
-            x = range(0, len(sims) * 100, 100)
-            ax.plot(x, sims, marker='o', linestyle='-', label='Similarities')
-            # ax.plot(x[:-1], sims[:-1], marker='o', linestyle='-', label='Similarities')
-            # ax.plot(x[-1], sims[-1], marker='o', linestyle='-', color="red", label='Similarities')
-
-            for i, a in enumerate(annots):
-                ax.annotate(a, (x[i], sims[i]))
-
-            ax.set_xlabel("Time")
-            ax.set_ylabel("Similarity Metrics")
-            plt.title(f"{len(wp_trajs)} Runs, 1 Training Iteration")
-            plt.savefig(os.path.join(IMG_DIR, f"run_{dataset_idx}.png"))
-
-        print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
-
-    if full_exp is None:
-        raise ValueError(f"Formula is not properly defined.")
-
-    # saves a digraph of the STL formula
-    if visualize_stl:
-        digraph = viz.make_stl_graph(full_exp)
-        viz.save_graph(digraph, "utils/formula")
-        print("Saved formula CG successfully.")
-
-    # recursive depth may result in overloading stack memory
-    robustness = (-full_exp.robustness(full_inputs)).squeeze()
-    stl_loss = torch.relu(robustness - margin).mean()
-
-    print(f"STL loss: {stl_loss}, \tSTL Computation Time (s): {time.time() - start_time}")
-
-    flush()
-
-    return stl_loss
-
-
-def process_run(
-        curr_stream: torch.cuda.Stream,
-        curr_run: torch.Tensor,
-        curr_interval: List,
-        # curr_goal: torch.Tensor,
-        pred_trajs: torch.Tensor,
-        threshold: List,
-        sims: List,
-        annots: List,
-        action_mask: torch.Tensor,
-        device: torch.device,
-) -> Tuple[Tuple, stlcg.Expression]:
-    """
-    Processes each stream for the current run on a GPU kernel.
-
-    Args:
-        curr_stream (`torch.cuda.Stream`):
-            An instance of the torch.cuda.Stream class.
-        curr_run (`torch.Tensor`):
-            The current run's waypoints to process.
-        curr_interval (`List`):
-            The current run's interval to process.
-        curr_goal (`torch.Tensor`):
-            The current run's goal to process.
-        pred_trajs (`torch.Tensor`):
-            The policy's predicted trajectories to perform comparison with.
-        threshold (`List`):
-            Threshold values for STL similarity expressions.
-        sims (`List`):
-            List of similarity metrics to visualize.
-        annots (`List`):
-            List of annotations to visualize.
+            If GPU is not available, use CPU.
 
     Returns:
-        `Tuple`:
-            The current inputs and STL expression for the current run.
+        `tuple`:
+          All models used during the STL creation process. Encoder and text-to-image models are not used for waypoint
+          generation.
     """
-    def reduce_similarity(similarity: torch.Tensor):
-        """
-        Reduces actions to 1D value.
-        """
-        while similarity.dim() > 1:
-            similarity = similarity.mean(dim=-1)
+    weights_dir = os.path.join(os.getcwd(), "pretrained_weights")
+    deeplab_dir = os.path.join(weights_dir, "deeplab/best_deeplabv3plus_resnet101_cityscapes_os16.pth.tar")
 
-        return similarity.mean()
-        # return (similarity * action_mask).mean() / (action_mask.mean() + 1e-2)
+    num_classes = 19
+    output_stride = 8
 
-    with torch.cuda.stream(curr_stream):
-        inner_exp = None
-        inner_inputs = ()
+    # semantic segmentation model
+    deeplab = modeling.__dict__["deeplabv3plus_resnet101"](num_classes=num_classes, output_stride=output_stride).eval()
+    deeplab.load_state_dict(torch.load(deeplab_dir)["model_state"])
 
-        for j in range(len(curr_run)):
-            curr_wp = curr_run[j].to(device)
-
-            # map each waypoint to the batch of predicted trajectories
-            subgoal_sim = reduce_similarity(F.cosine_similarity(
-                curr_wp.unsqueeze(1).expand(-1, pred_trajs.size(0), -1, -1),
-                pred_trajs.unsqueeze(0).expand(curr_wp.size(0), -1, -1, -1),
-                dim=-1,
-            )).unsqueeze(0).unsqueeze(0).unsqueeze(0)
-
-            # for visualization
-            sims.append(to_numpy(subgoal_sim).flatten())
-            annots.append(f"w_{len(sims)}")
-
-            # recursively add subgoal metric to inner inputs
-            if len(inner_inputs) == 0:
-                inner_inputs = subgoal_sim
-            else:
-                inner_inputs = (inner_inputs, subgoal_sim)
-
-            # access the current interval
-            interv = curr_interval[j]
-
-            # add subgoal to STL formula
-            subgoal_sim = stlcg.Eventually(
-                stlcg.Expression("phi_ij", subgoal_sim) > threshold[0],
-                interval=[interv[0], interv[1]]
-            )
-
-            # recursively add subgoal exp to inner exp
-            if inner_exp is None:
-                inner_exp = subgoal_sim
-            else:
-                inner_exp &= subgoal_sim  # test AND vs OR
-
-    return inner_inputs, inner_exp
+    return deeplab.to(device), None, None
