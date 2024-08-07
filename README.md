@@ -13,7 +13,7 @@ This project incorporates "NoMaD: Goal Masking Diffusion Policies for Navigation
 Ensure that the STL functions are integrated properly in the NoMaD training functions, specifically in train_utils, train_eval_loop, and train.py.  
 
 ## Dataset
-We use the [X-Embodiment](https://robotics-transformer-x.github.io/) collaboration dataset ([SACSoN](https://sites.google.com/view/sacson-review/home), [RECON](https://sites.google.com/view/recon-robot/dataset)) to train the policy and generate STL waypoints.  
+The [X-Embodiment](https://robotics-transformer-x.github.io/) collaboration dataset ([SACSoN](https://sites.google.com/view/sacson-review/home), [RECON](https://sites.google.com/view/recon-robot/dataset)) is used to train the policy and generate STL waypoints.  
 
 ## Setup
 
