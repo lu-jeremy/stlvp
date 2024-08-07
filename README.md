@@ -1,7 +1,7 @@
 # Neural Signal Temporal Logic Vision Planner (STLVP)
 
 ## Overview
-This codebase implements the neural STLVP, which is the first framework to integrate signal temporal logic computation graphs (STLCG) for end-to-end visual navigation in robotics. STLVP reduces sample complexity in supervised learning and non-convex minimization problems. It has been demonstrated to perform more efficiently than traditional optimal policy optimization methods.  
+This codebase implements the neural STLVP, the first framework to integrate signal temporal logic computation graphs (STLCG) for end-to-end visual navigation in robotics. STLVP reduces sample complexity in supervised learning and non-convex minimization problems. It has been demonstrated to perform more efficiently than traditional optimal policy optimization methods.  
 
 ### Pipelines: 
   1) The **vision pipeline** leverages [DeepLabv3](https://arxiv.org/abs/1706.05587), [StableDiffusion](https://github.com/CompVis/stable-diffusion), and [MobileViT](https://arxiv.org/abs/2110.02178) to propose semantically-segmented subgoals in pixel space and satisfy STL robustness in latent space.  
