@@ -8,7 +8,7 @@ STLVP reduces sample complexity in supervised learning and non-convex minimizati
   1) The **vision pipeline** leverages [DeepLabv3](https://arxiv.org/abs/1706.05587), [StableDiffusion](https://github.com/CompVis/stable-diffusion), and [MobileViT](https://arxiv.org/abs/2110.02178) to propose semantically-segmented subgoals in pixel space and satisfy STL robustness in latent space.  
   2) The **trajectory pipeline** constrains the diffusion model's predicted trajectories with spatio-temporal waypoint specifications.  
 
-This project incorporates "NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration" (ICRA'2024), which is a visuomotor diffusion policy mapping raw observation image inputs to candidate actions. NoMaD enables joint policy learning for both goal-agnostic and goal-oriented tasks. More architectural details can be viewed in its [repository](https://github.com/robodhruv/visualnav-transformer/).
+This project incorporates "NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration" (ICRA'2024), which proposed a goal-agnostic and goal-oriented visuomotor diffusion policy, mapping raw observation image inputs to candidate actions. More architectural details can be viewed in its [repository](https://github.com/robodhruv/visualnav-transformer/).
 
 Ensure that the STL functions are integrated properly in the NoMaD training functions, specifically in train_utils, train_eval_loop, and train.py.  
 
