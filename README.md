@@ -12,7 +12,7 @@ STLVP reduces sample complexity in supervised learning and non-convex minimizati
 
 This project integrates the PyTorch framework for [STLCG](https://arxiv.org/abs/2008.00097) (WAFR'2020) and the goal-agnostic/oriented diffusion policy in "NoMaD: Goal Masking Diffusion Policies for Navigation and Exploration" (ICRA'2024). NoMaD's architectural details can be viewed in its [repository](https://github.com/robodhruv/visualnav-transformer/).
 
-Ensure that the STL functions are integrated properly in the NoMaD training functions, specifically in train_utils, train_eval_loop, and train.py.  
+Ensure that the STL functions are called properly in the NoMaD training objectives, specifically in train_utils, train_eval_loop, and train.py.  
 
 ## Dataset
 The [X-Embodiment](https://robotics-transformer-x.github.io/) collaboration dataset ([SACSoN](https://sites.google.com/view/sacson-review/home), [RECON](https://sites.google.com/view/recon-robot/dataset)) is used to train the policy and generate STL waypoints.  
