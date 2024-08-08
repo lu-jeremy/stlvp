@@ -47,49 +47,32 @@ from network import modeling
 
 """
 TODO
-- plot randomized waypoints w/ different color and policy actions
-- gif
-- eliminate assumptions: new STL exp, make sure each batch is 1 run, sequential satisfaction but not full satisfaction, update memory of STL formula
-
+- gif, only save one observation for one run at end of epoch, over time save
 - language lit review
 - check entire pipeline
-- MSE loss
 
 - change function docs
 - parallelize wp generation process, faster text-to-image model
-- lerp, slerp, etc...
-- try leakyrelu
+- lerp, slerp, etc..., STL leakyrelu
 - negative prompts/STL examples
 - automate params on cmd line
 
-- our diffusion model is parallelized across multiple GPUs using nn.DataParallel
-- whole dataset records traj and observation images for each run
-- it is preprocessed to have finite horizon of 8 actions for each observation image, ultimately to reach the goal
-- camera intrinsics for each dataset, probably not necessary
+- diffusion model parallelized across multiple GPUs using nn.DataParallel
+- dataset records traj and obs images for each run
+- finite horizon of 8 actions for each obs image w/ goal
+- camera intrinsics for each dataset are probably not necessary, there are built-in functions for mapping 3d -> 2d
 """
+
 
 login(os.getenv("HUGGINGFACE_HUB_TOKEN"))
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:21000"
 sys.setrecursionlimit(10000)  # needed for STL robustness
 
-# TODO: watch out for these lines
-# reset img and latent directories
-img_path = os.path.join(WP_DIR, IMG_DIR)
+# reset img and latent directories, if needed
 latent_path = os.path.join(WP_DIR, LATENT_DIR)
-
-if not os.path.isdir(img_path):
-    os.makedirs(img_path, exist_ok=True)
-else:
-    if RESET_IMG_DIR:
-        shutil.rmtree(img_path)
-        os.makedirs(img_path, exist_ok=True)
 
 if not os.path.isdir(latent_path):
     os.makedirs(latent_path, exist_ok=True)
-# else:
-#     if latent_path:
-#         shutil.rmtree(latent_path)
-#         os.makedirs(latent_path, exist_ok=True)
 
 subgoal_dir = os.path.join(latent_path, "subgoal")
 goal_dir = os.path.join(latent_path, "goal")
@@ -100,6 +83,12 @@ if not os.path.isdir(subgoal_dir):
 if not os.path.isdir(goal_dir):
     os.makedirs(goal_dir, exist_ok=True)
 
+if not os.path.isdir(IMG_DIR):
+    os.makedirs(IMG_DIR, exist_ok=True)
+else:
+    if RESET_IMG_DIR:
+        shutil.rmtree(IMG_DIR)
+        os.makedirs(IMG_DIR, exist_ok=True)
 
 
 def process_run(
@@ -786,12 +775,12 @@ def load_models(device: torch.device) -> Tuple:
         use_auth_token=True).eval()
 
     # text-to-image models
-    # token_model = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
     pipe = StableDiffusionPipeline.from_pretrained(
         "CompVis/stable-diffusion-v1-1",
         cache_dir=os.path.join(weights_dir, "stable_diffusion"),
         use_auth_token=True,
     )
 
+    # send all models to the device
     return deeplab.to(device), mb_vit.to(device), pipe.to(device)
 
