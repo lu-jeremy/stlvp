@@ -47,13 +47,15 @@ from network import modeling
 
 """
 TODO
-- test diffusion loss
-- test objective on recon
-- MSE loss
-- language lit review
-- make sure each batch is 1 run
+- plot randomized waypoints w/ different color and policy actions
+- gif
+- eliminate assumptions: new STL exp, make sure each batch is 1 run, sequential satisfaction but not full satisfaction, update memory of STL formula
 
-- change docs
+- language lit review
+- check entire pipeline
+- MSE loss
+
+- change function docs
 - parallelize wp generation process, faster text-to-image model
 - lerp, slerp, etc...
 - try leakyrelu
@@ -61,6 +63,9 @@ TODO
 - automate params on cmd line
 
 - our diffusion model is parallelized across multiple GPUs using nn.DataParallel
+- whole dataset records traj and observation images for each run
+- it is preprocessed to have finite horizon of 8 actions for each observation image, ultimately to reach the goal
+- camera intrinsics for each dataset, probably not necessary
 """
 
 login(os.getenv("HUGGINGFACE_HUB_TOKEN"))

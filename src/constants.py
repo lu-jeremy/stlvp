@@ -5,7 +5,7 @@ TRAJ_DIR = './traj'
 
 NUM_THRESH = 1
 PERSISTENCE_THRESH = 10  # Δt for object persistence
-SIM_THRESH = [0.5, 0.15]  # indicates the satisfaction threshold for similarity distance
+SIM_THRESH = [0.999, 0.15]  # indicates the satisfaction threshold for similarity distance
 
 LOAD_WAYPOINTS = True  # `True` if training, `False` if pre-processing
 ENABLE_INTERVALS = True  # enable the use of intervals
