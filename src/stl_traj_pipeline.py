@@ -153,19 +153,39 @@ def cossim_method(
 
 
 def mse_method(
+        curr_run: torch.Tensor,
+        pred_trajs: torch.Tensor,
+        threshold: List,
+        goal_pos: torch.Tensor,
         inner_inputs: Tuple,
         inner_exp: None,
+        device: torch.device,
         ax: plt.axes._subplots.AxesSubplot,
-        curr_run: torch.Tensor,
+        visualize_traj: bool = VISUALIZE_TRAJ,
 ) -> Tuple[Tuple, stlcg.Expression]:
     """
     MSE loss method. Constructs the STL formula s.t. it satisfies all observation image trajectory predictions
     at once, and each trajectory prediction should have similarity metrics with all waypoint paths.
 
     Args:
-        inner_inputs (`tuple`):
-        inner_exp (`stlcg.Expression`):
         curr_run (`torch.Tensor`):
+            List of waypoints for the current run of observations.
+        pred_trajs (`torch.Tensor`):
+            Predicted trajectories for the current batch of observations.
+        threshold (`List`):
+            Similarity threshold for STL waypoint expression.
+        goal_pos (`torch.Tensor`):
+            Ground truth goal position drawn from the dataset.
+        inner_inputs (`tuple`):
+            Inner recursive inputs to the robustness function for the current run.
+        inner_exp (`stlcg.Expression`):
+            Inner expression for the current run.
+        device (`torch.device`):
+            The device to move tensors onto.
+        ax (`torch.Tensor`):
+            Axes to plot waypoint and trajectories with.
+        visualize_traj (`bool`, defaults to `VISUALIZE_TRAJ`):
+            Whether to visualize waypoint and predicted trajectories.
 
     Returns:
         `tuple`:
@@ -205,32 +225,50 @@ def mse_method(
     assert len(traj_sims.shape) == 256
 
     # retrieve the closest waypoint
-    max_idx = torch.argmax(traj_sims, dim=1)
-    print(f"max_idx shape {max_idx.shape}")
-    assert len(max_idx) == 256
+    closest_indices = torch.argmax(traj_sims, dim=1)
+    print(f"closest_indices shape {closest_indices.shape}")
+    assert len(closest_indices) == 256
 
-    # plot the filtered waypoint trajectories with the corresponding predicted trajectory
-    for i in range(len(max_idx)):
-        wp_sequence = curr_run[max_idx[i].item():]  # (w, t, 8, 2)
-        obs_traj = pred_trajs[i]
+    if visualize_traj:
+        # plot the filtered waypoint trajectories with the corresponding predicted trajectory
+        for i in range(len(closest_indices)):
+            wp_sequence = curr_run[closest_indices[i].item():]  # (w, t, 8, 2)
+            pred_obs_traj = pred_trajs[i]
 
-        for j in range(len(wp_sequence)):
-            wp = wp_sequence[j]
             traj_list = [
-                wp,  # (t, 8, 2)
-                obs_traj,  # (8, 2)
+                *wp_sequence,  # (t, 8, 2)
+                pred_obs_traj[None],  # (1, 8, 2)
             ]
 
-            traj_colors = ["red"] * len(wp) + ["green"] * len(obs_traj) + ["magenta"]
-            traj_alphas = [1] * (len(wp) + len(obs_traj)) + [1]
+            traj_colors = ["red"] * len(wp_sequence[0]) + ["green"] * len(pred_obs_traj)
+            traj_alphas = [1.0] * (len(wp_sequence[0]) + len(pred_obs_traj))
 
+            # make points numpy array of robot positions (0, 0) and goal positions
+            point_list = [np.array([0, 0]), to_numpy(goal_pos[i])]
+            point_colors = ["green", "red"]
+            point_alphas = [1.0, 1.0]
 
+            plot_trajs_and_points(
+                ax[0],
+                traj_list,
+                point_list,
+                traj_colors,
+                point_colors,
+                traj_labels=None,
+                point_labels=None,
+                quiver_freq=0,
+                traj_alphas=traj_alphas,
+                point_alphas=point_alphas,
+            )
 
-    # print(f"the closest waypoint is w_{max_idx} ")
+            ax[0].set_title("Predicted Trajectory Against Waypoints")
+            save_path = os.path.join(IMG_DIR, f"obs_{i}.png")
+            plt.savefig(save_path)
+            plt.close(fig)
 
     # constructs STL formula based on w_{i} -> w_{i + 1} -> ..., where i = argmax(traj_sims)
     for i in range(len(traj_sims)):
-        filtered_sims = traj_sims[i][max_idx[i].item():]
+        filtered_sims = traj_sims[i][closest_indices[i].item():]
 
         inner_inner_inputs = ()
         inner_inner_exp = None
@@ -245,7 +283,11 @@ def mse_method(
             else:
                 inner_inner_inputs = (inner_inner_inputs, wp_sim)
 
-            wp_sim = stlcg.Expression("w_i", wp_sim)
+            print(f"wp_sim: {wp_sim}")
+            sys.exit()
+
+            # similarity expression for the current waypoint
+            wp_sim = stlcg.Expression("w_i", wp_sim) > threshold[0]
 
             if inner_inner_exp is None:
                 inner_inner_exp = wp_sim
@@ -269,10 +311,11 @@ def mse_method(
 def process_run(
         curr_stream: torch.cuda.Stream,
         curr_run: torch.Tensor,
-        curr_interval: List,
-        # curr_goal: torch.Tensor,
         pred_trajs: torch.Tensor,
+        # curr_goal: torch.Tensor,
+        goal_pos: torch.Tensor,
         threshold: List,
+        curr_interval: List,
         sims: List,
         annots: List,
         action_mask: torch.Tensor,
@@ -287,18 +330,24 @@ def process_run(
             An instance of the torch.cuda.Stream class.
         curr_run (`torch.Tensor`):
             The current run's waypoints to process.
-        curr_interval (`List`):
-            The current run's interval to process.
-        curr_goal (`torch.Tensor`):
-            The current run's goal to process.
         pred_trajs (`torch.Tensor`):
             The policy's predicted trajectories to perform comparison with.
+        curr_goal (`torch.Tensor`):
+            The current run's goal to process.
+        goal_pos (`torch.Tensor`):
+            Goal position used for plotting.
         threshold (`List`):
             Threshold values for STL similarity expressions.
+        curr_interval (`List`):
+            The current run's interval to process.
         sims (`List`):
             List of similarity metrics to visualize.
         annots (`List`):
             List of annotations to visualize.
+        action_mask (`torch.Tensor`):
+            Action mask used for clipping action outputs.
+        device (`torch.Tensor`):
+            Device to move tensors onto.
 
     Returns:
         `Tuple`:
@@ -310,10 +359,26 @@ def process_run(
         inner_inputs = ()
 
         # create the waypoint plot
-        fig, ax = plt.subplots(1, 3)
+        fig, ax = plt.subplots(1)
 
-        return mse_method(inner_inputs, inner_exp, ax, curr_run)
-        # return cossim_method(inner_inputs, inner_exp, ax, curr_run)
+        return mse_method(
+            curr_run=curr_run,
+            pred_trajs=pred_trajs,
+            threshold=threshold,
+            goal_pos=goal_pos,
+            inner_inputs=inner_inputs,
+            inner_exp=inner_exp,
+            device=device,
+            ax=ax,
+        )
+
+        # return cossim_method(
+        #     inner_inputs=inner_inputs,
+        #     inner_exp=inner_exp,
+        #     ax=ax,
+        #     curr_run=curr_run,
+        #     goal_pos=goal_pos,
+        # )
 
 
 def compute_stl_loss(
@@ -324,6 +389,7 @@ def compute_stl_loss(
         streams: List,
         dataset_idx: int,
         action_mask: torch.Tensor,
+        goal_pos: torch.Tensor,
         margin: int = 0,  # TODO: change
         visualize_stl: bool = VISUALIZE_STL,
         vis_freq: int = VIS_FREQ,
@@ -349,10 +415,16 @@ def compute_stl_loss(
             Encoder for observation latents.
         streams (`List`):
             List of torch.cuda.Stream's instances to deploy runs on a multi-stream setup.
+        dataset_idx (`int`):
+            The current dataset iteration.
+        goal_pos (`torch.Tensor`):
+            The goal coordinates for the current batch.
         margin (`int`, defaults to 0):
            Margin in the ReLU objective.
         visualize_stl (`bool`, defaults to `VISUALIZE_STL`):
             Determines the STL formula visualization.
+        vis_freq (`int`, defaults to `VIS_FREQ`):
+            Visualization frequency for plotting similarity metrics.
         threshold (`List`, defaults to `SIM_THRESH`):
             Threshold values for STL similarity expressions.
     Returns:
@@ -388,10 +460,11 @@ def compute_stl_loss(
         inner_inputs, inner_exp = process_run(
             curr_stream=stream,
             curr_run=wp_trajs[i],
-            curr_interval=intervals[i],
             # curr_goal=goal_trajs[i],
             pred_trajs=pred_trajs,
+            goal_pos=goal_pos,
             threshold=threshold,
+            curr_interval=intervals[i],
             sims=sims,
             annots=annots,
             action_mask=action_mask,
