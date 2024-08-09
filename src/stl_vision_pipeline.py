@@ -49,13 +49,12 @@ from network import modeling
 TODO
 - parallelize robustness
 - language lit review
-- check entire pipeline
+- check entire pipeline: object persistence, stl formula calculation, diffusion noise -> traj
 
-- change function docs
 - parallelize wp generation process, faster text-to-image model
 - lerp, slerp, etc..., STL leakyrelu
 - negative prompts/STL examples
-- automate params on cmd line
+- automate params on cmd line; set up yaml config file, fix function docs
 
 - diffusion model parallelized across multiple GPUs using nn.DataParallel
 - dataset records traj and obs images for each run

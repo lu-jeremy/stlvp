@@ -62,33 +62,6 @@ frame_dir = os.path.join(IMG_DIR, "frames")
 if not os.path.isdir(frame_dir):
     os.makedirs(frame_dir, exist_ok=True)
 
-imgs = []
-for root, dir, files in os.walk(frame_dir):
-    for file in files:
-        imgs.append(file)
-
-imgs = sorted(imgs, key=lambda x: int(x[x.find("_", x.find("_") + 1) + 1: x.find(".")]))
-
-# load images using OpenCV
-images = []
-for img_path in imgs:
-    full_path = os.path.join(frame_dir, img_path)
-    img = cv2.imread(full_path)
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
-    images.append(img)
-
-# save images as a GIF
-with imageio.get_writer(os.path.join(IMG_DIR, 'obs_0.gif'), mode='I', duration=1000/3, loop=0) as writer:
-    for image in images[:900]:  # Select first 900 images
-        writer.append_data(image)
-sys.exit()
-# # PIL doesn't support plt alpha values
-# # imgs = [Image.open(os.path.join(frame_dir, img_path)) for img_path in imgs]
-# # imgs = [img.convert("RGBA") for img in imgs]
-#
-# # imgs[0].save(os.path.join(IMG_DIR, "obs_0.gif"), save_all=True, append_images=imgs[1:900], duration=1000/7, loop=0)
-
-
 
 def reduce_similarity(similarity: torch.Tensor) -> torch.Tensor:
     """
@@ -249,6 +222,8 @@ def mse_method(
             reduction="none",
         ))
 
+        assert (traj_sim > 0).all()
+
         # each pred trajectory should have a similarity metric with the wp's paths
         assert len(traj_sim) == 256, "Metric is not computed correctly"
 
@@ -269,16 +244,11 @@ def mse_method(
     start_time = time.time()
 
     # constructs STL formula based on w_{i} -> w_{i + 1} -> ..., where i = argmax(traj_sims)
-
-    # temp = []
-
     for i in range(len(traj_sims)):
         # the closest wp in the current obs predicted traj
         closest_wp_idx = closest_indices[i].item()
         # filtered similarity metrics for the current pred traj
         filtered_sims = traj_sims[i][closest_wp_idx:]
-
-        # temp.append(filtered_sims.mean())
 
         inner_inner_inputs = ()
         inner_inner_exp = None
@@ -315,76 +285,9 @@ def mse_method(
         else:
             inner_exp &= inner_inner_exp
 
-    # print(f"full mean {torch.stack(temp).mean()}")
-
     if visualize_traj:
         # plot the filtered wp traj with the corresponding pred traj
-
-        for i in range(len(closest_indices)):
-            # if i % 50 != 0:
-            #     continue
-
-            fig, ax = plt.subplots()
-            x_limit = 25
-            y_limit = 25
-
-            # w_{argmax_{t} pred_traj}, w_{t+1}, ...
-            wp_sequence = [wp.detach().cpu().numpy() for wp in curr_run[closest_indices[i].item():]]  # (w, t, 8, 2)
-            # detach first for less computational overhead
-            pred_obs_traj = pred_trajs[i].detach().cpu().numpy()[None]
-
-            # each waypoint has shape (t, 8, 2)
-            traj_list = np.concatenate([
-                *wp_sequence,  # (w, t, 8, 2)
-                pred_obs_traj,  # (1, 8, 2),
-            ], axis=0)
-
-            # generate RGB colors for each waypoint path
-            wp_colors = list(colors.CSS4_COLORS.keys())[:len(wp_sequence)]
-
-            # each set of waypoint trajs receives 1 color
-            wp_seq_colors = [wp_colors[i] for i in range(len(wp_sequence)) for _ in wp_sequence[i]]
-            traj_colors = wp_seq_colors + ["green"] * len(pred_obs_traj)
-            traj_alphas = [0.7] * sum(len(wp) for wp in wp_sequence) + [1.0] * len(pred_obs_traj)
-
-            # make points numpy array of robot positions (0, 0) and goal positions
-            point_list = [np.array([0, 0]), goal_pos[i].detach().cpu().numpy()]
-            point_colors = ["black", "yellow"]
-            point_alphas = [1.0, 1.0]
-
-            traj_labels = [f"w_{i}" for i in range(len(wp_sequence)) for _ in wp_sequence[i]] + ["pred"]
-
-            # 20
-            # print(f"f len pred_obs_traj: {len(pred_obs_traj)}")
-            # print(f"len traj_labels: {len(traj_labels)}")
-            # print(f"len traj_list: {len(traj_list)}")
-            # print(f"len traj_colors: {len(traj_colors)}")
-            # print(f"len traj_alphas: {len(traj_alphas)}")
-
-            # plot the trajectories and start/end points
-            plot_trajs_and_points(
-                ax,
-                traj_list,
-                point_list,
-                traj_colors,
-                point_colors,
-                traj_labels=traj_labels,
-                point_labels=["robot", "goal"],
-                quiver_freq=0,
-                traj_alphas=traj_alphas,
-                point_alphas=point_alphas,
-                frame_dir=frame_dir,
-            )
-
-            ax.set_title("Predicted Trajectory Against Waypoints")
-            ax.set_xlim(-x_limit, x_limit)
-            ax.set_ylim(-y_limit, y_limit)
-
-            save_path = os.path.join(frame_dir, f"obs_{i}_{dataset_idx}.png")
-            plt.savefig(save_path)
-            plt.close(fig)
-
-            break  # TODO: only for first one for now
+        save_traj_frames(closest_indices, curr_run, pred_trajs)
 
         # sys.exit()  # TODO: for now
 
@@ -478,7 +381,9 @@ def compute_stl_loss(
         goal_pos: torch.Tensor,
         margin: int = 0,  # TODO: change
         visualize_stl: bool = VISUALIZE_STL,
+        visualize_sim: bool = VISUALIZE_SIM,
         vis_freq: int = VIS_FREQ,
+        anim_freq: int = ANIM_FREQ,
         threshold: List = SIM_THRESH,
         weight_stl: float = WEIGHT_STL,
 ) -> Union[None, torch.Tensor]:
@@ -510,6 +415,8 @@ def compute_stl_loss(
            Margin in the ReLU objective.
         visualize_stl (`bool`, defaults to `VISUALIZE_STL`):
             Determines the STL formula visualization.
+        visualize_sim (`bool`, defaults to `VISUALIZE_SIM`):
+            Determines the trajectory and animation visualization.
         vis_freq (`int`, defaults to `VIS_FREQ`):
             Visualization frequency for plotting similarity metrics.
         threshold (`List`, defaults to `SIM_THRESH`):
@@ -546,31 +453,8 @@ def compute_stl_loss(
     for i, stream in enumerate(streams):
         # start_time = time.time()
 
-        # only one run
-        full_inputs, full_exp = process_run(
-            curr_stream=stream,
-            curr_run=wp_trajs[i],
-            # curr_goal=goal_trajs[i],
-            pred_trajs=pred_trajs,
-            goal_pos=goal_pos,
-            threshold=threshold,
-            curr_interval=intervals[i],
-            sims=sims,
-            annots=annots,
-            action_mask=action_mask,
-            device=device,
-            visualize_traj=True,
-            dataset_idx=dataset_idx,
-        )
-        break
-
-        # # TODO: temp, only plot the first run, of the first pred traj, of the first wp
-        # if i == 0:
-        #     visualize_traj = True
-        # else:
-        #     visualize_traj = False
-        #
-        # inner_inputs, inner_exp = process_run(
+        # # only one run
+        # full_inputs, full_exp = process_run(
         #     curr_stream=stream,
         #     curr_run=wp_trajs[i],
         #     # curr_goal=goal_trajs[i],
@@ -582,21 +466,44 @@ def compute_stl_loss(
         #     annots=annots,
         #     action_mask=action_mask,
         #     device=device,
-        #     visualize_traj=visualize_traj,
+        #     visualize_traj=True,
         #     dataset_idx=dataset_idx,
         # )
-        #
-        # # full input tuples are not concerned with individual values
-        # if len(full_inputs) == 0:
-        #     full_inputs = inner_inputs
-        # else:
-        #     full_inputs = (full_inputs, inner_inputs)
-        #
-        # # recursively add inner exp to full exp
-        # if full_exp is None:
-        #     full_exp = inner_exp
-        # else:
-        #     full_exp |= inner_exp
+        # break
+
+        # TODO: temp, only plot the first run, of the first pred traj, of the first wp
+        if i == 0:
+            visualize_traj = True
+        else:
+            visualize_traj = False
+
+        inner_inputs, inner_exp = process_run(
+            curr_stream=stream,
+            curr_run=wp_trajs[i],
+            # curr_goal=goal_trajs[i],
+            pred_trajs=pred_trajs,
+            goal_pos=goal_pos,
+            threshold=threshold,
+            curr_interval=intervals[i],
+            sims=sims,
+            annots=annots,
+            action_mask=action_mask,
+            device=device,
+            visualize_traj=visualize_traj,
+            dataset_idx=dataset_idx,
+        )
+
+        # full input tuples are not concerned with individual values
+        if len(full_inputs) == 0:
+            full_inputs = inner_inputs
+        else:
+            full_inputs = (full_inputs, inner_inputs)
+
+        # recursively add inner exp to full exp
+        if full_exp is None:
+            full_exp = inner_exp
+        else:
+            full_exp |= inner_exp
 
         # print(f"Stream {i} time: {time.time() - start_time}")
 
@@ -622,7 +529,9 @@ def compute_stl_loss(
         viz.save_graph(digraph, "utils/formula")
         print("Saved formula CG successfully.")
 
-    if VISUALIZE_SIM:
+    if visualize_sim:
+        vis_time = time.time()
+
         if dataset_idx % vis_freq == 0:
             sims = sims[:20]
             annots = annots[:20]
@@ -640,6 +549,11 @@ def compute_stl_loss(
             plt.savefig(os.path.join(IMG_DIR, f"run_{dataset_idx}.png"))
 
         print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
+
+        if dataset_idx % anim_freq == 0:
+            save_traj_anim(frame_dir=frame_dir)
+
+        print(f"visualization time: {time.time() - vis_time}")
 
     print(f"STL loss: {weight_stl * stl_loss}, \tSTL Compute Time (s): {time.time() - start_time}")
 
@@ -857,8 +771,9 @@ def load_models(device: torch.device) -> Tuple:
     Returns:
         `tuple`:
           All models used during the STL creation process. Encoder and text-to-image models are not used for waypoint
-          generation.
+          trajectory generation.
     """
+
     weights_dir = os.path.join(os.getcwd(), "pretrained_weights")
     deeplab_dir = os.path.join(weights_dir, "deeplab/best_deeplabv3plus_resnet101_cityscapes_os16.pth.tar")
 

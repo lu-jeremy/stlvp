@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import wandb
 import os
-from typing import Optional
+from typing import Optional, List
 
 RED = np.array([1, 0, 0])
 GREEN = np.array([0, 1, 0])
@@ -12,6 +12,119 @@ BLUE = np.array([0, 0, 1])
 CYAN = np.array([0, 1, 1])
 YELLOW = np.array([1, 1, 0])
 MAGENTA = np.array([1, 0, 1])
+
+
+def save_traj_frames(closest_indices: torch.Tensor, curr_run: List, pred_trajs: torch.Tensor, num_save: int = 1):
+    """
+    Saves the trajectory frames against the corresponding waypoint(s).
+
+    Args:
+        closest_indices (`torch.Tensor`):
+            Argmax of similarities for each predicted trajectory.
+        curr_run (`List`):
+            Current run for the batch of observations.
+        pred_trajs (`torch.Tensor`):
+            The policy's predicted trajectories with a set finite horizon.
+        num_save (`int`, defaults to `1`):
+            The number of trajectories in the batch to save.
+    """
+    for i in range(len(closest_indices)):
+        if i == num_save - 1:
+            break
+        # if i % 50 != 0:
+        #     continue
+
+        fig, ax = plt.subplots()
+        x_limit = 25
+        y_limit = 25
+
+        # w_{argmax_{t} pred_traj}, w_{t+1}, ...
+        wp_sequence = [wp.detach().cpu().numpy() for wp in curr_run[closest_indices[i].item():]]  # (w, t, 8, 2)
+        # detach first for less computational overhead
+        pred_obs_traj = pred_trajs[i].detach().cpu().numpy()[None]
+
+        # each waypoint has shape (t, 8, 2)
+        traj_list = np.concatenate([
+            *wp_sequence,  # (w, t, 8, 2)
+            pred_obs_traj,  # (1, 8, 2),
+        ], axis=0)
+
+        # generate RGB colors for each waypoint path
+        wp_colors = list(colors.CSS4_COLORS.keys())[:len(wp_sequence)]
+
+        # each set of waypoint trajs receives 1 color
+        wp_seq_colors = [wp_colors[i] for i in range(len(wp_sequence)) for _ in wp_sequence[i]]
+        traj_colors = wp_seq_colors + ["green"] * len(pred_obs_traj)
+        traj_alphas = [1.0] * sum(len(wp) for wp in wp_sequence) + [1.0] * len(pred_obs_traj)
+
+        # make points numpy array of robot positions (0, 0) and goal positions
+        point_list = [np.array([0, 0]), goal_pos[i].detach().cpu().numpy()]
+        point_colors = ["black", "yellow"]
+        point_alphas = [1.0, 1.0]
+
+        traj_labels = [f"w_{i}" for i in range(len(wp_sequence)) for _ in wp_sequence[i]] + ["pred"]
+
+        # 20
+        # print(f"f len pred_obs_traj: {len(pred_obs_traj)}")
+        # print(f"len traj_labels: {len(traj_labels)}")
+        # print(f"len traj_list: {len(traj_list)}")
+        # print(f"len traj_colors: {len(traj_colors)}")
+        # print(f"len traj_alphas: {len(traj_alphas)}")
+
+        # plot the trajectories and start/end points
+        plot_trajs_and_points(
+            ax,
+            traj_list,
+            point_list,
+            traj_colors,
+            point_colors,
+            traj_labels=traj_labels,
+            point_labels=["robot", "goal"],
+            quiver_freq=0,
+            traj_alphas=traj_alphas,
+            point_alphas=point_alphas,
+            frame_dir=frame_dir,
+        )
+
+        ax.set_title("Predicted Trajectory Against Waypoints")
+        ax.set_xlim(-x_limit, x_limit)
+        ax.set_ylim(-y_limit, y_limit)
+
+        save_path = os.path.join(frame_dir, f"obs_{i}_{dataset_idx}.png")
+        plt.savefig(save_path)
+        plt.close(fig)
+
+
+def save_traj_anim(frame_dir: str):
+    """
+    Saves an animation of the predicted trajectories over a set of frames and waypoints.
+    """
+
+    imgs = []
+    for root, dir, files in os.walk(frame_dir):
+        for file in files:
+            imgs.append(file)
+
+    imgs = sorted(imgs, key=lambda x: int(x[x.find("_", x.find("_") + 1) + 1: x.find(".")]))
+
+    # load images using OpenCV
+    images = []
+    for img_path in imgs:
+        full_path = os.path.join(frame_dir, img_path)
+        img = cv2.imread(full_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+        images.append(img)
+
+    # save images as a GIF
+    with imageio.get_writer(os.path.join(IMG_DIR, 'obs_0.gif'), mode='I', duration=1000 / 3, loop=0) as writer:
+        for image in images[:900]:  # Select first 900 images
+            writer.append_data(image)
+
+    # # PIL doesn't support plt alpha values
+    # # imgs = [Image.open(os.path.join(frame_dir, img_path)) for img_path in imgs]
+    # # imgs = [img.convert("RGBA") for img in imgs]
+    #
+    # # imgs[0].save(os.path.join(IMG_DIR, "obs_0.gif"), save_all=True, append_images=imgs[1:900], duration=1000/7, loop=0)
 
 
 # taken from https://github.com/robodhruv/visualnav-transformer/blob/7b5b24cf12d0989fb5b5ff378d5630dd737eec3b/train/vint_train/visualizing/action_utils.py
