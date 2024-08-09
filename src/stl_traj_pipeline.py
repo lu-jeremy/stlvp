@@ -11,6 +11,7 @@ from matplotlib import colors
 import cv2
 import tqdm
 from PIL import Image
+import imageio
 import wandb
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
@@ -65,13 +66,28 @@ if not os.path.isdir(frame_dir):
 # for root, dir, files in os.walk(frame_dir):
 #     for file in files:
 #         imgs.append(file)
-#
+# 
 # imgs = sorted(imgs, key=lambda x: int(x[x.find("_", x.find("_") + 1) + 1: x.find(".")]))
-# imgs = [Image.open(os.path.join(frame_dir, img_path)) for img_path in imgs]
 #
-# imgs[0].save(os.path.join(IMG_DIR, "obs_0.gif"), save_all=True, append_images=imgs[1:], duration=500, loop=0)
+# # load images using OpenCV
+# images = []
+# for img_path in imgs:
+#     full_path = os.path.join(frame_dir, img_path)
+#     img = cv2.imread(full_path)
+#     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+#     images.append(img)
 #
+# # save images as a GIF
+# with imageio.get_writer(os.path.join(IMG_DIR, 'obs_0.gif'), mode='I', duration=1000/3) as writer:
+#     for image in images[:900]:  # Select first 900 images
+#         writer.append_data(image)
 # sys.exit()
+# # PIL doesn't support plt alpha values
+# # imgs = [Image.open(os.path.join(frame_dir, img_path)) for img_path in imgs]
+# # imgs = [img.convert("RGBA") for img in imgs]
+#
+# # imgs[0].save(os.path.join(IMG_DIR, "obs_0.gif"), save_all=True, append_images=imgs[1:900], duration=1000/7, loop=0)
+
 
 
 def reduce_similarity(similarity: torch.Tensor) -> torch.Tensor:
@@ -208,8 +224,9 @@ def mse_method(
         visualize_traj (`bool`):
             Whether to visualize waypoint and predicted trajectories.
         gamma (`float`, defaults to 1.12):
-            Discounted factor for threshold.
-        dataset_idx:
+            Growth factor for threshold.
+        dataset_idx (`int`):
+            Current iteration of the training loop.
 
     Returns:
         `tuple`:
@@ -328,7 +345,7 @@ def mse_method(
             # each set of waypoint trajs receives 1 color
             wp_seq_colors = [wp_colors[i] for i in range(len(wp_sequence)) for _ in wp_sequence[i]]
             traj_colors = wp_seq_colors + ["green"] * len(pred_obs_traj)
-            traj_alphas = [0.1] * sum(len(wp) for wp in wp_sequence) + [1.0] * len(pred_obs_traj)
+            traj_alphas = [0.7] * sum(len(wp) for wp in wp_sequence) + [1.0] * len(pred_obs_traj)
 
             # make points numpy array of robot positions (0, 0) and goal positions
             point_list = [np.array([0, 0]), goal_pos[i].detach().cpu().numpy()]
