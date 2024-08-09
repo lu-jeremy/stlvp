@@ -11,7 +11,7 @@ WEIGHT_STL = 0.01  # stl loss weight in full diffusion objective
 LOAD_WAYPOINTS = True  # `True` if training, `False` if pre-processing
 ENABLE_INTERVALS = True  # enable the use of intervals
 
-RESET_IMG_DIR = True  # erase and re-create the image directory
+RESET_IMG_DIR = False  # erase and re-create the image directory
 RESET_LATENT_DIR = False  # erase and re-create the latents directory
 
 PROCESS_SUBGOALS = True  # process dataset subgoals
@@ -21,6 +21,6 @@ VISUALIZE_DATASET = False  # visualize example batch dataset images
 VISUALIZE_SUBGOALS = False  # visualize the generated subgoal images
 VISUALIZE_STL = False  # visualize the STL formula
 VISUALIZE_SIM = False  # visualize the similarity metrics
-VISUALIZE_TRAJ = True  # visualize waypoint and predicted trajectories in STL computation
+VISUALIZE_TRAJ = False  # visualize waypoint and predicted trajectories in STL computation
 VIS_FREQ = 50  # for similarity metrics
 VISUALIZATION_IMAGE_SIZE = (640, 680)

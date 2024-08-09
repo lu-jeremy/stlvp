@@ -52,14 +52,26 @@ if not os.path.isdir(goal_dir):
 
 if not os.path.isdir(IMG_DIR):
     os.makedirs(IMG_DIR, exist_ok=True)
-else:
-    if RESET_IMG_DIR:
-        shutil.rmtree(IMG_DIR)
-        os.makedirs(IMG_DIR, exist_ok=True)
-
+# else:
+#     if RESET_IMG_DIR:
+#         shutil.rmtree(IMG_DIR)
+#         os.makedirs(IMG_DIR, exist_ok=True)
+#
 frame_dir = os.path.join(IMG_DIR, "frames")
 if not os.path.isdir(frame_dir):
     os.makedirs(frame_dir, exist_ok=True)
+
+# imgs = []
+# for root, dir, files in os.walk(frame_dir):
+#     for file in files:
+#         imgs.append(file)
+#
+# imgs = sorted(imgs, key=lambda x: int(x[x.find("_", x.find("_") + 1) + 1: x.find(".")]))
+# imgs = [Image.open(os.path.join(frame_dir, img_path)) for img_path in imgs]
+#
+# imgs[0].save(os.path.join(IMG_DIR, "obs_0.gif"), save_all=True, append_images=imgs[1:], duration=500, loop=0)
+#
+# sys.exit()
 
 
 def reduce_similarity(similarity: torch.Tensor) -> torch.Tensor:
