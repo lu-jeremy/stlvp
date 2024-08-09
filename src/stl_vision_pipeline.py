@@ -47,7 +47,6 @@ from network import modeling
 
 """
 TODO
-- gif, only save one observation for one run at end of epoch, over time save
 - parallelize robustness
 - language lit review
 - check entire pipeline

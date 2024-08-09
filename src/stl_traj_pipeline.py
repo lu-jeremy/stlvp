@@ -62,26 +62,26 @@ frame_dir = os.path.join(IMG_DIR, "frames")
 if not os.path.isdir(frame_dir):
     os.makedirs(frame_dir, exist_ok=True)
 
-# imgs = []
-# for root, dir, files in os.walk(frame_dir):
-#     for file in files:
-#         imgs.append(file)
-# 
-# imgs = sorted(imgs, key=lambda x: int(x[x.find("_", x.find("_") + 1) + 1: x.find(".")]))
-#
-# # load images using OpenCV
-# images = []
-# for img_path in imgs:
-#     full_path = os.path.join(frame_dir, img_path)
-#     img = cv2.imread(full_path)
-#     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
-#     images.append(img)
-#
-# # save images as a GIF
-# with imageio.get_writer(os.path.join(IMG_DIR, 'obs_0.gif'), mode='I', duration=1000/3) as writer:
-#     for image in images[:900]:  # Select first 900 images
-#         writer.append_data(image)
-# sys.exit()
+imgs = []
+for root, dir, files in os.walk(frame_dir):
+    for file in files:
+        imgs.append(file)
+
+imgs = sorted(imgs, key=lambda x: int(x[x.find("_", x.find("_") + 1) + 1: x.find(".")]))
+
+# load images using OpenCV
+images = []
+for img_path in imgs:
+    full_path = os.path.join(frame_dir, img_path)
+    img = cv2.imread(full_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+    images.append(img)
+
+# save images as a GIF
+with imageio.get_writer(os.path.join(IMG_DIR, 'obs_0.gif'), mode='I', duration=1000/3, loop=0) as writer:
+    for image in images[:900]:  # Select first 900 images
+        writer.append_data(image)
+sys.exit()
 # # PIL doesn't support plt alpha values
 # # imgs = [Image.open(os.path.join(frame_dir, img_path)) for img_path in imgs]
 # # imgs = [img.convert("RGBA") for img in imgs]
