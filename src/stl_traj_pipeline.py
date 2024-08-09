@@ -26,13 +26,12 @@ from viz_utils import *
 from text_utils import *
 from constants import *
 
-
 sys.path.insert(0, "stlcg/src")  # disambiguate path names
 import stlcg
 import stlviz as viz
 
 # loading in deeplabv3 custom repo
-sys.path.insert(0, "DeepLabV3Plus-Pytorch")
+sys.path.insert(0,  "DeepLabV3Plus-Pytorch")
 from network import modeling
 
 
@@ -171,7 +170,9 @@ def mse_method(
         inner_inputs: Tuple,
         inner_exp: None,
         device: torch.device,
-        visualize_traj: bool = VISUALIZE_TRAJ,
+        visualize_traj: bool,
+        dataset_idx: int,
+        gamma: float = 1.12,
 ) -> Tuple[Tuple, stlcg.Expression]:
     """
     MSE loss method. Constructs the STL formula s.t. it satisfies all predicted observation trajectories
@@ -192,10 +193,11 @@ def mse_method(
             Inner expression for the current run.
         device (`torch.device`):
             The device to move tensors onto.
-        plots (`tuple`):
-            Figure and axes to plot trajectories onto.
-        visualize_traj (`bool`, defaults to `VISUALIZE_TRAJ`):
+        visualize_traj (`bool`):
             Whether to visualize waypoint and predicted trajectories.
+        gamma (`float`, defaults to 1.12):
+            Discounted factor for threshold.
+        dataset_idx:
 
     Returns:
         `tuple`:
@@ -203,26 +205,23 @@ def mse_method(
             the full STL expression.
     """
 
+    # move trajs to GPU
+    curr_run = [wp.to(device) for wp in curr_run]
+    pred_trajs.to(device)
+
+    # initialize list to store similarity metrics
     traj_sims = []
 
-    for i in range(len(curr_run)):
-        curr_wp = curr_run[i].to(device)
-
-        # map each observation to the batch of predicted trajectories
+    for curr_wp in curr_run:
+        # map each predicted trajectory to the wps
         traj_sim = reduce_similarity(F.mse_loss(
             curr_wp.unsqueeze(0).expand(pred_trajs.size(0), -1, -1, -1),
             pred_trajs.unsqueeze(1).expand(-1, curr_wp.size(0), -1, -1),
             reduction="none",
         ))
 
-        # each observation trajectory should have a similarity metric with all paths in the waypoint
+        # each pred trajectory should have a similarity metric with the wp's paths
         assert len(traj_sim) == 256, "Metric is not computed correctly"
-
-        # subgoal_sim = reduce_similarity(F.cosine_similarity(
-        #     curr_wp.unsqueeze(1).expand(-1, pred_trajs.size(0), -1, -1),
-        #     pred_trajs.unsqueeze(0).expand(curr_wp.size(0), -1, -1, -1),
-        #     dim=-1,
-        # ))
 
         traj_sims.append(traj_sim)
 
@@ -230,7 +229,7 @@ def mse_method(
     traj_sims = torch.stack(traj_sims).transpose(0, 1)
 
     # print(f"num wps: {len(curr_run)}")  # varies
-    # print(f"traj_sims shape {traj_sims.shape}")  # (256, x)
+    # print(f"traj_sims shape {traj_sims.shape}")  # (256, num_waypoints)
     assert len(traj_sims) == 256, "traj_sims is not converted to tensor properly"
 
     # retrieve the closest waypoint to each pred traj
@@ -238,14 +237,69 @@ def mse_method(
     # print(f"closest_indices shape {closest_indices.shape}")  # (256,)
     assert len(closest_indices) == 256, "There are less than the acceptable amount of observations"
 
+    start_time = time.time()
+
+    # constructs STL formula based on w_{i} -> w_{i + 1} -> ..., where i = argmax(traj_sims)
+
+    # temp = []
+
+    for i in range(len(traj_sims)):
+        # the closest wp in the current obs predicted traj
+        closest_wp_idx = closest_indices[i].item()
+        # filtered similarity metrics for the current pred traj
+        filtered_sims = traj_sims[i][closest_wp_idx:]
+
+        # temp.append(filtered_sims.mean())
+
+        inner_inner_inputs = ()
+        inner_inner_exp = None
+
+        # gradually increase the threshold for future similarities
+        discounted_thresholds = [gamma ** j * threshold[0] for j in range(len(filtered_sims))]
+
+        # constructs a seq of filtered wp similarities: w_{i} U w_{i+1} U w_{i+2} ...
+        for j in range(len(filtered_sims)):
+            # current wp in the filtered sequence
+            wp_sim = filtered_sims[j].unsqueeze(0).unsqueeze(0).unsqueeze(0)
+
+            if len(inner_inner_inputs) == 0:
+                inner_inner_inputs = wp_sim
+            else:
+                inner_inner_inputs = (inner_inner_inputs, wp_sim)
+
+            # similarity expression for the current waypoint
+            wp_sim = stlcg.Expression(f"w_{i}_{closest_wp_idx}", wp_sim) < discounted_thresholds[j]
+
+            if inner_inner_exp is None:
+                inner_inner_exp = wp_sim
+            else:
+                inner_inner_exp = stlcg.Until(inner_inner_exp, wp_sim)
+
+        if len(inner_inputs) == 0:
+            inner_inputs = inner_inner_inputs
+        else:
+            inner_inputs = (inner_inputs, inner_inner_inputs)
+
+        # Constructs (w_{i} U w_{i+1} U w_{i+2} ...) ⋀ (w_{j} U w_{j+1} U w_{j+2} ...) ⋀ ...
+        if inner_exp is None:
+            inner_exp = inner_inner_exp
+        else:
+            inner_exp &= inner_inner_exp
+
+    # print(f"full mean {torch.stack(temp).mean()}")
+
     if visualize_traj:
         # plot the filtered wp traj with the corresponding pred traj
+
         for i in range(len(closest_indices)):
-            if i % 50 != 0:
-                continue
+            # if i % 50 != 0:
+            #     continue
 
             fig, ax = plt.subplots()
+            x_limit = 25
+            y_limit = 25
 
+            # w_{argmax_{t} pred_traj}, w_{t+1}, ...
             wp_sequence = [wp.detach().cpu().numpy() for wp in curr_run[closest_indices[i].item():]]  # (w, t, 8, 2)
             # detach first for less computational overhead
             pred_obs_traj = pred_trajs[i].detach().cpu().numpy()[None]
@@ -256,8 +310,8 @@ def mse_method(
                 pred_obs_traj,  # (1, 8, 2),
             ], axis=0)
 
-            # generate random RGB colors for each waypoint path
-            wp_colors = [colors.to_hex(np.random.rand(3)) for i in range(len(wp_sequence))]
+            # generate RGB colors for each waypoint path
+            wp_colors = list(colors.CSS4_COLORS.keys())[:len(wp_sequence)]
 
             # each set of waypoint trajs receives 1 color
             wp_seq_colors = [wp_colors[i] for i in range(len(wp_sequence)) for _ in wp_sequence[i]]
@@ -294,47 +348,16 @@ def mse_method(
             )
 
             ax.set_title("Predicted Trajectory Against Waypoints")
-            save_path = os.path.join(IMG_DIR, f"obs_{i}.png")
+            ax.set_xlim(-x_limit, x_limit)
+            ax.set_ylim(-y_limit, y_limit)
+
+            save_path = os.path.join(frame_dir, f"obs_{i}_{dataset_idx}.png")
             plt.savefig(save_path)
             plt.close(fig)
 
-        sys.exit()  # TODO: for now
+            break  # TODO: only for first one for now
 
-    # constructs STL formula based on w_{i} -> w_{i + 1} -> ..., where i = argmax(traj_sims)
-    for i in range(len(traj_sims)):
-        filtered_sims = traj_sims[i][closest_indices[i].item():]
-
-        inner_inner_inputs = ()
-        inner_inner_exp = None
-
-        # Constructs a single sequence of filtered waypoint similarities
-        for j in range(len(filtered_sims)):
-            # current wp in the filtered sequence
-            wp_sim = filtered_sims[j].unsqueeze(0).unsqueeze(0).unsqueeze(0)
-
-            if len(inner_inner_inputs) == 0:
-                inner_inner_inputs = wp_sim
-            else:
-                inner_inner_inputs = (inner_inner_inputs, wp_sim)
-
-            # similarity expression for the current waypoint
-            wp_sim = stlcg.Expression("w_i", wp_sim) < threshold[0]
-
-            if inner_inner_exp is None:
-                inner_inner_exp = wp_sim
-            else:
-                inner_inner_exp = stlcg.Until(inner_inner_exp, wp_sim)
-
-        if len(inner_inputs) == 0:
-            inner_inputs = inner_inner_inputs
-        else:
-            inner_inputs = (inner_inputs, inner_inner_inputs)
-
-        # Constructs (w_{i} U w_{i+1} U w_{i+2} ...) ⋀ (w_{j} U w_{j+1} U w_{j+2} ...) ⋀ ...
-        if inner_exp is None:
-            inner_exp = inner_inner_exp
-        else:
-            inner_exp &= inner_inner_exp
+        # sys.exit()  # TODO: for now
 
     return inner_inputs, inner_exp
 
@@ -351,6 +374,8 @@ def process_run(
         annots: List,
         action_mask: torch.Tensor,
         device: torch.device,
+        visualize_traj: bool,
+        dataset_idx: int,
 ) -> Tuple[Tuple, stlcg.Expression]:
     """
     Processes each stream for the current run on a GPU kernel. Constructs an STL formula for each run, which is to be
@@ -379,6 +404,9 @@ def process_run(
             Action mask used for clipping action outputs.
         device (`torch.Tensor`):
             Device to move tensors onto.
+        dataset_idx (`int`):
+
+        visualize_traj (`bool`):
 
     Returns:
         `Tuple`:
@@ -397,6 +425,8 @@ def process_run(
             inner_inputs=inner_inputs,
             inner_exp=inner_exp,
             device=device,
+            visualize_traj=visualize_traj,
+            dataset_idx=dataset_idx,
         )
 
         # return cossim_method(
@@ -421,6 +451,7 @@ def compute_stl_loss(
         visualize_stl: bool = VISUALIZE_STL,
         vis_freq: int = VIS_FREQ,
         threshold: List = SIM_THRESH,
+        weight_stl: float = WEIGHT_STL,
 ) -> Union[None, torch.Tensor]:
     """
     Generates STL formula and inputs for robustness, while computing the STL loss based on robustness.
@@ -463,7 +494,7 @@ def compute_stl_loss(
     batch_size = 256
     if pred_trajs.size(0) < batch_size:
         print(f"NOT LARGE ENOUGH: {pred_trajs.size()}")
-        return None
+        return None, None
 
     start_time = time.time()
 
@@ -486,7 +517,8 @@ def compute_stl_loss(
     for i, stream in enumerate(streams):
         # start_time = time.time()
 
-        inner_inputs, inner_exp = process_run(
+        # only one run
+        full_inputs, full_exp = process_run(
             curr_stream=stream,
             curr_run=wp_trajs[i],
             # curr_goal=goal_trajs[i],
@@ -498,19 +530,44 @@ def compute_stl_loss(
             annots=annots,
             action_mask=action_mask,
             device=device,
+            visualize_traj=True,
+            dataset_idx=dataset_idx,
         )
+        break
 
-        # full input tuples are not concerned with individual values
-        if len(full_inputs) == 0:
-            full_inputs = inner_inputs
-        else:
-            full_inputs = (full_inputs, inner_inputs)
-
-        # recursively add inner exp to full exp
-        if full_exp is None:
-            full_exp = inner_exp
-        else:
-            full_exp |= inner_exp
+        # # TODO: temp, only plot the first run, of the first pred traj, of the first wp
+        # if i == 0:
+        #     visualize_traj = True
+        # else:
+        #     visualize_traj = False
+        #
+        # inner_inputs, inner_exp = process_run(
+        #     curr_stream=stream,
+        #     curr_run=wp_trajs[i],
+        #     # curr_goal=goal_trajs[i],
+        #     pred_trajs=pred_trajs,
+        #     goal_pos=goal_pos,
+        #     threshold=threshold,
+        #     curr_interval=intervals[i],
+        #     sims=sims,
+        #     annots=annots,
+        #     action_mask=action_mask,
+        #     device=device,
+        #     visualize_traj=visualize_traj,
+        #     dataset_idx=dataset_idx,
+        # )
+        #
+        # # full input tuples are not concerned with individual values
+        # if len(full_inputs) == 0:
+        #     full_inputs = inner_inputs
+        # else:
+        #     full_inputs = (full_inputs, inner_inputs)
+        #
+        # # recursively add inner exp to full exp
+        # if full_exp is None:
+        #     full_exp = inner_exp
+        # else:
+        #     full_exp |= inner_exp
 
         # print(f"Stream {i} time: {time.time() - start_time}")
 
@@ -520,8 +577,15 @@ def compute_stl_loss(
     if full_exp is None:
         raise ValueError(f"Formula is not properly defined.")
 
+    # print(f"full_exp: {full_exp}")
+    # print(f"full_inputs: {full_inputs}")
+
+    robustness_time = time.time()
     robustness = full_exp.robustness(full_inputs).squeeze()
+    print(f"elapsed time for robustness: {time.time() - robustness_time}")
+    robustness_time = time.time()
     stl_loss = torch.relu(-robustness - margin).mean()
+    print(f"elapsed time for stl loss: {time.time() - robustness_time}")
 
     # saves a digraph of the STL formula
     if visualize_stl:
@@ -548,11 +612,11 @@ def compute_stl_loss(
 
         print(f"COSSIM RECURSIVE Time (s): {time.time() - test_start}")
 
-    print(f"STL loss: {stl_loss}, \tSTL Computation Time (s): {time.time() - start_time}")
+    print(f"STL loss: {weight_stl * stl_loss}, \tSTL Compute Time (s): {time.time() - start_time}")
 
     flush()
 
-    return robustness, stl_loss
+    return robustness, weight_stl * stl_loss
 
 
 def predict_start_samples(
