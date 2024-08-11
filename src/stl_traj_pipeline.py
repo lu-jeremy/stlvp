@@ -241,7 +241,7 @@ def mse_method(
     # print(f"closest_indices shape {closest_indices.shape}")  # (256,)
     assert len(closest_indices) == 256, "There are less than the acceptable amount of observations"
 
-    start_time = time.time()
+    # start_time = time.time()
 
     # constructs STL formula based on w_{i} -> w_{i + 1} -> ..., where i = argmax(traj_sims)
     for i in range(len(traj_sims)):
@@ -253,7 +253,7 @@ def mse_method(
         inner_inner_inputs = ()
         inner_inner_exp = None
 
-        # gradually increase the threshold for future similarities
+        # gradually increase the threshold for future similarities, TODO: test
         discounted_thresholds = [gamma ** j * threshold[0] for j in range(len(filtered_sims))]
 
         # constructs a seq of filtered wp similarities: w_{i} U w_{i+1} U w_{i+2} ...
@@ -267,7 +267,7 @@ def mse_method(
                 inner_inner_inputs = (inner_inner_inputs, wp_sim)
 
             # similarity expression for the current waypoint
-            wp_sim = stlcg.Expression(f"w_{i}_{closest_wp_idx}", wp_sim) < discounted_thresholds[j]
+            wp_sim = stlcg.Expression(f"w_{i}_{closest_wp_idx + j}", wp_sim) < discounted_thresholds[j]
 
             if inner_inner_exp is None:
                 inner_inner_exp = wp_sim
@@ -453,31 +453,8 @@ def compute_stl_loss(
     for i, stream in enumerate(streams):
         # start_time = time.time()
 
-        # # only one run
-        # full_inputs, full_exp = process_run(
-        #     curr_stream=stream,
-        #     curr_run=wp_trajs[i],
-        #     # curr_goal=goal_trajs[i],
-        #     pred_trajs=pred_trajs,
-        #     goal_pos=goal_pos,
-        #     threshold=threshold,
-        #     curr_interval=intervals[i],
-        #     sims=sims,
-        #     annots=annots,
-        #     action_mask=action_mask,
-        #     device=device,
-        #     visualize_traj=True,
-        #     dataset_idx=dataset_idx,
-        # )
-        # break
-
-        # TODO: temp, only plot the first run, of the first pred traj, of the first wp
-        if i == 0:
-            visualize_traj = True
-        else:
-            visualize_traj = False
-
-        inner_inputs, inner_exp = process_run(
+        # only one run
+        full_inputs, full_exp = process_run(
             curr_stream=stream,
             curr_run=wp_trajs[i],
             # curr_goal=goal_trajs[i],
@@ -489,21 +466,44 @@ def compute_stl_loss(
             annots=annots,
             action_mask=action_mask,
             device=device,
-            visualize_traj=visualize_traj,
+            visualize_traj=True,
             dataset_idx=dataset_idx,
         )
+        break
 
-        # full input tuples are not concerned with individual values
-        if len(full_inputs) == 0:
-            full_inputs = inner_inputs
-        else:
-            full_inputs = (full_inputs, inner_inputs)
-
-        # recursively add inner exp to full exp
-        if full_exp is None:
-            full_exp = inner_exp
-        else:
-            full_exp |= inner_exp
+        # # TODO: temp, only plot the first run, of the first pred traj, of the first wp
+        # if i == 0:
+        #     visualize_traj = True
+        # else:
+        #     visualize_traj = False
+        #
+        # inner_inputs, inner_exp = process_run(
+        #     curr_stream=stream,
+        #     curr_run=wp_trajs[i],
+        #     # curr_goal=goal_trajs[i],
+        #     pred_trajs=pred_trajs,
+        #     goal_pos=goal_pos,
+        #     threshold=threshold,
+        #     curr_interval=intervals[i],
+        #     sims=sims,
+        #     annots=annots,
+        #     action_mask=action_mask,
+        #     device=device,
+        #     visualize_traj=visualize_traj,
+        #     dataset_idx=dataset_idx,
+        # )
+        #
+        # # full input tuples are not concerned with individual values
+        # if len(full_inputs) == 0:
+        #     full_inputs = inner_inputs
+        # else:
+        #     full_inputs = (full_inputs, inner_inputs)
+        #
+        # # recursively add inner exp to full exp
+        # if full_exp is None:
+        #     full_exp = inner_exp
+        # else:
+        #     full_exp |= inner_exp
 
         # print(f"Stream {i} time: {time.time() - start_time}")
 
