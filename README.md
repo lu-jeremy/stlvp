@@ -1,4 +1,4 @@
-# Neural Signal Temporal Logic Vision-Language Planner (STLVLP)
+# Neural Signal Temporal Logic Vision-Language Planner (STL-VLP)
 
 ## Overview
 This codebase implements the neural STLVLP, the first framework to integrate signal temporal logic computation graphs (STLCG) for end-to-end visual navigation in robotics.  
