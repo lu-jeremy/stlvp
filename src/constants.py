@@ -4,8 +4,8 @@ LATENT_DIR = './latents'
 TRAJ_DIR = './traj'
 
 NUM_THRESH = 1
-PERSISTENCE_THRESH = 10  # Δt for object persistence
-SIM_THRESH = [5, 0.15]  # indicates the satisfaction threshold for similarity distance
+PERSISTENCE_THRESH = 2  # relaxation parameter Δt for object persistence
+SIM_THRESH = [20, 0.15]  # indicates the satisfaction threshold for similarity distance
 WEIGHT_STL = 5e-3  # stl loss weight in full diffusion objective
 
 LOAD_WAYPOINTS = True  # `True` if training, `False` if pre-processing

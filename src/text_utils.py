@@ -78,7 +78,8 @@ def filter_preds(
         data_pos: int = 0,
 ) -> Tuple[List, List, np.ndarray]:
     """
-    Filters predictions based on criteria, used for text-to-image subgoal generation.
+    Filters segmentation model's predictions based on criteria, used for text-to-image subgoal generation.
+    Outputs the text predictions, filtered trajectories for each waypoint out of all ground-truth trajectories, and intervals.
 
     Args:
         outputs (`np.ndarray`):
@@ -103,8 +104,7 @@ def filter_preds(
     # format of image doesn't matter, flatten
     preds = preds.reshape(preds.shape[0], -1)
 
-    preds_comb = [np.unique(p, return_counts=True)
-                  for p in preds]
+    preds_comb = [np.unique(p, return_counts=True) for p in preds]
 
     # filter out predictions
     trajs = []
@@ -119,8 +119,8 @@ def filter_preds(
     # time elapsed between initial tracking of landmark
     dt = 0
     # valid landmarks
-    object_landmarks = np.array([2, 3, 4, 5, 6, 7])
-    # object_landmarks = np.array([i for i in range(19)])
+    # object_landmarks = np.array([2, 3, 4, 5, 6, 7])
+    object_landmarks = np.array([i for i in range(19)])
 
     # retrieve n-top unique classes
     for t, (preds_unique, counts) in enumerate(preds_comb):
