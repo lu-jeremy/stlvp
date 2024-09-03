@@ -973,101 +973,101 @@ class TemporalOperator(DifferentiableSTL):
 #         return "I" + str(self.interval) + "(" + str(self.subformula) + ")"
 
 
-# class Expression(torch.nn.Module):
-#     '''
-#     Wraps a pytorch arithmetic operation, so that we can intercept and overload comparison operators.
-#     Expression allows us to express tensors using their names to make it easier to code up and read,
-#     but also keep track of their numeric values.
-#     '''
-#     def __init__(self, name, value):
-#         super(Expression, self).__init__()
-#         self.name = name
-#         self.value = value
+class Expression(torch.nn.Module):
+    '''
+    Wraps a pytorch arithmetic operation, so that we can intercept and overload comparison operators.
+    Expression allows us to express tensors using their names to make it easier to code up and read,
+    but also keep track of their numeric values.
+    '''
+    def __init__(self, name, value):
+        super(Expression, self).__init__()
+        self.name = name
+        self.value = value
 
-#     def set_name(self, new_name):
-#         self.name = new_name
+    def set_name(self, new_name):
+        self.name = new_name
 
-#     def set_value(self, new_value):
-#         self.value = new_value
+    def set_value(self, new_value):
+        self.value = new_value
 
-#     def __neg__(self):
-#         return Expression(-self.value)
+    def __neg__(self):
+        return Expression(-self.value)
 
-#     def __add__(self, other):
-#         if isinstance(other, Expression):
-#             return Expression(self.name + '+' + other.name, self.value + other.value)
-#         else:
-#             return Expression(self.name + "+other", self.value + other)
+    def __add__(self, other):
+        if isinstance(other, Expression):
+            return Expression(self.name + '+' + other.name, self.value + other.value)
+        else:
+            return Expression(self.name + "+other", self.value + other)
 
-#     def __radd__(self, other):
-#         return self.__add__(other)
-#         # No need for the case when "other" is an Expression, since that
-#         # case will be handled by the regular add
+    def __radd__(self, other):
+        return self.__add__(other)
+        # No need for the case when "other" is an Expression, since that
+        # case will be handled by the regular add
 
-#     def __sub__(self, other):
-#         if isinstance(other, Expression):
-#             return Expression(self.name + '-' + other.name, self.value - other.value)
-#         else:
-#             return Expression(self.name + "-other", self.value - other)
-
-
-#     def __rsub__(self, other):
-#         return Expression(other - self.value)
-#         # No need for the case when "other" is an Expression, since that
-#         # case will be handled by the regular sub
-
-#     def __mul__(self, other):
-#         if isinstance(other, Expression):
-#             return Expression(self.name + '*' + other.name, self.value * other.value)
-#         else:
-#             return Expression(self.name + "*other", self.value * other)
+    def __sub__(self, other):
+        if isinstance(other, Expression):
+            return Expression(self.name + '-' + other.name, self.value - other.value)
+        else:
+            return Expression(self.name + "-other", self.value - other)
 
 
-#     def __rmul__(self, other):
-#         return self.__mul__(other)
+    def __rsub__(self, other):
+        return Expression(other - self.value)
+        # No need for the case when "other" is an Expression, since that
+        # case will be handled by the regular sub
 
-#     def __truediv__(a, b):
-#         # This is the new form required by Python 3
-#         numerator = a
-#         denominator = b
-#         num_name = 'num'
-#         denom_name = 'denom'
-#         if isinstance(numerator, Expression):
-#             num_name = numerator.name
-#             numerator = numerator.value
-#         if isinstance(denominator, Expression):
-#             denom_name = denominator.name
-#             denominator = denominator.value
-#         return Expression(num_name + '/' + denom_name, numerator/denominator)
+    def __mul__(self, other):
+        if isinstance(other, Expression):
+            return Expression(self.name + '*' + other.name, self.value * other.value)
+        else:
+            return Expression(self.name + "*other", self.value * other)
 
-#     # Comparators
-#     def __lt__(lhs, rhs):
-#         assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of LessThan needs to be a string or Expression"
-#         assert not isinstance(rhs, str), "RHS cannot be a string"
-#         return LessThan(lhs, rhs)
 
-#     def __le__(lhs, rhs):
-#         assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of LessThan needs to be a string or Expression"
-#         assert not isinstance(rhs, str), "RHS cannot be a string"
-#         return LessThan(lhs, rhs)
+    def __rmul__(self, other):
+        return self.__mul__(other)
 
-#     def __gt__(lhs, rhs):
-#         assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of GreaterThan needs to be a string or Expression"
-#         assert not isinstance(rhs, str), "RHS cannot be a string"
-#         return GreaterThan(lhs, rhs)
+    def __truediv__(a, b):
+        # This is the new form required by Python 3
+        numerator = a
+        denominator = b
+        num_name = 'num'
+        denom_name = 'denom'
+        if isinstance(numerator, Expression):
+            num_name = numerator.name
+            numerator = numerator.value
+        if isinstance(denominator, Expression):
+            denom_name = denominator.name
+            denominator = denominator.value
+        return Expression(num_name + '/' + denom_name, numerator/denominator)
 
-#     def __ge__(lhs, rhs):
-#         assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of GreaterThan needs to be a string or Expression"
-#         assert not isinstance(rhs, str), "RHS cannot be a string"
-#         return GreaterThan(lhs, rhs)
+    # Comparators
+    def __lt__(lhs, rhs):
+        assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of LessThan needs to be a string or Expression"
+        assert not isinstance(rhs, str), "RHS cannot be a string"
+        return LessThan(lhs, rhs)
 
-#     def __eq__(lhs, rhs):
-#         assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of Equal needs to be a string or Expression"
-#         assert not isinstance(rhs, str), "RHS cannot be a string"
-#         return Equal(lhs, rhs)
+    def __le__(lhs, rhs):
+        assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of LessThan needs to be a string or Expression"
+        assert not isinstance(rhs, str), "RHS cannot be a string"
+        return LessThan(lhs, rhs)
 
-#     def __ne__(lhs, rhs):
-#         raise NotImplementedError("Not supported yet")
+    def __gt__(lhs, rhs):
+        assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of GreaterThan needs to be a string or Expression"
+        assert not isinstance(rhs, str), "RHS cannot be a string"
+        return GreaterThan(lhs, rhs)
 
-#     def __str__(self):
-#         return str(self.name)
+    def __ge__(lhs, rhs):
+        assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of GreaterThan needs to be a string or Expression"
+        assert not isinstance(rhs, str), "RHS cannot be a string"
+        return GreaterThan(lhs, rhs)
+
+    def __eq__(lhs, rhs):
+        assert isinstance(lhs, str) | isinstance(lhs, Expression), "LHS of Equal needs to be a string or Expression"
+        assert not isinstance(rhs, str), "RHS cannot be a string"
+        return Equal(lhs, rhs)
+
+    def __ne__(lhs, rhs):
+        raise NotImplementedError("Not supported yet")
+
+    def __str__(self):
+        return str(self.name)

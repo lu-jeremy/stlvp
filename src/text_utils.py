@@ -140,7 +140,7 @@ def filter_preds(
 
                 # only when a valid landmark is seen and robot sees objects for more than dt frames
                 if not dt < PERSISTENCE_THRESH:
-                    print(f"Not good landmark -> final interval: [{start}, {end}]")
+                    # print(f"Not good landmark -> final interval: [{start}, {end}]")
                     # if robot sees object for only a couple frames, it's not good grounds to include it as a landmark
                     intervals.append([start, end])
                     preds.append(curr_pred)
@@ -205,7 +205,7 @@ def filter_preds(
 
             # if object persistence < dt, restart the counter, but the current landmark doesn't qualify
             if not dt < PERSISTENCE_THRESH:
-                print(f"Good landmark -> final interval: [{start}, {end}]")
+                # print(f"Good landmark -> final interval: [{start}, {end}]")
                 intervals.append([start, end])
                 preds.append(curr_pred)
                 trajs.append(actions[start: end + 1])
@@ -233,7 +233,7 @@ def filter_preds(
                 for i in range(len(preds))
     ]
 
-    print("PROMPTS:", preds)
+    # print("PROMPTS:", preds)
     print(f"NUM IMAGES/PROMPTS: {len(preds)}")
 
     return preds, trajs, intervals

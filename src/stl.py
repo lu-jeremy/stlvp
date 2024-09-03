@@ -532,6 +532,16 @@ class Until(Node):
     ) -> None:
         super().__init__()
 
+        self.left_time_bound = left_time_bound
+
+        if right_unbound:
+            self.right_time_bound = np.inf
+        else:
+            self.right_time_bound = right_time_bound
+
+        self._interval = [self.left_time_bound, self.right_time_bound]
+        self.interval = self._interval
+
         assert left_child is not None
         assert right_child is not None
 
@@ -539,8 +549,6 @@ class Until(Node):
         self.right_child: Node = right_child
         self.unbound: bool = unbound
         self.right_unbound: bool = right_unbound
-        self.left_time_bound: int = left_time_bound
-        self.right_time_bound: int = right_time_bound + 1
         self.subformulas = [left_child, right_child]
 
         if (self.unbound is False) and (self.right_unbound is False) and \
@@ -652,39 +660,46 @@ class Until(Node):
 
         interval = self.interval
 
+        breakpoint()
+
         trace1 = self.left_child(env, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
         trace2 = self.right_child(env, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
 
-        Alw = stlcg.Always(subformula=stlcg.Identity(name=str(self.subformula1)))
+        always = Always(subformula=stlcg.Identity(name=str(self.subformula1)))
 
         minish = stlcg.Minish()
         maxish = stlcg.Maxish()
 
         LHS = trace2.unsqueeze(-1).repeat([1, 1, 1,trace2.shape[1]]).permute(0, 3, 2, 1)
-        if interval == None:
+        if interval == None or (self.interval[1] == np.inf) & (self.interval[0] == 0):
+            # Case 1
             RHS = torch.ones_like(LHS)*-LARGE_NUMBER
             for i in range(trace2.shape[1]):
-                RHS[:,i:,:,i] = Alw(trace1[:,i:,:])
+                RHS[:, i:, :, i] = always._run_cell(trace1)
+
             return maxish(
-                            minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1, keepdim=False, agm=agm, distributed=distributed),
-                        scale=scale, dim=-1, keepdim=False, agm=agm, distributed=distributed)
+                minish(torch.stack([LHS, RHS], dim=-1), scale=scale, dim=-1, keepdim=False, agm=agm, distributed=distributed),
+                scale=scale, dim=-1, keepdim=False, agm=agm, distributed=distributed
+            )
+
         elif interval[1] < np.Inf:  # [a, b] where b < ∞
+            # Case 2
             a = int(interval[0])
             b = int(interval[1])
             RHS = [torch.ones_like(trace1)[:,:b,:] * -LARGE_NUMBER]
-            for i in range(b,trace2.shape[1]):
-                A = trace2[:,i-b:i-a+1,:].unsqueeze(-1)
+            for i in range(b, trace2.shape[1]):
+                A = trace2[:, i-b: i-a+1, :].unsqueeze(-1)
                 relevant = trace1[:,:i+1,:]
-                B = Alw(relevant.flip(1), scale=scale, keepdim=keepdim, distributed=distributed)[:,a:b+1,:].flip(1).unsqueeze(-1)
+                B = always(relevant.flip(1), scale=scale, keepdim=keepdim, distributed=distributed)[:,a:b+1,:].flip(1).unsqueeze(-1)
                 RHS.append(maxish(minish(torch.cat([A,B], dim=-1), dim=-1, scale=scale, keepdim=False, distributed=distributed), dim=1, scale=scale, keepdim=keepdim, distributed=distributed))
-            return torch.cat(RHS, dim=1);
+            return torch.cat(RHS, dim=1)
         else:
             a = int(interval[0])   # [a, ∞] where a < ∞
             RHS = [torch.ones_like(trace1)[:,:a,:] * -LARGE_NUMBER]
             for i in range(a,trace2.shape[1]):
                 A = trace2[:,:i-a+1,:].unsqueeze(-1)
                 relevant = trace1[:,:i+1,:]
-                B = Alw(relevant.flip(1), scale=scale, keepdim=keepdim, distributed=distributed)[:,a:,:].flip(1).unsqueeze(-1)
+                B = always(relevant.flip(1), scale=scale, keepdim=keepdim, distributed=distributed)[:,a:,:].flip(1).unsqueeze(-1)
                 RHS.append(maxish(minish(torch.cat([A,B], dim=-1), dim=-1, scale=scale, keepdim=False, distributed=distributed), dim=1, scale=scale, keepdim=keepdim, distributed=distributed))
             return torch.cat(RHS, dim=1)
 
@@ -849,8 +864,8 @@ class Or(Node):
 
     def _robustness_trace(self, env, pscale=1, scale=-1, keepdim=True, agm=False, distributed=False, **kwargs):
         xx = torch.cat([
-            And.separate_and(self.left_subformula, env, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs),
-            And.separate_and(self.right_subformula, env, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
+            Or.separate_or(self.left_subformula, env, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs),
+            Or.separate_or(self.right_subformula, env, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
         ], axis=-1)
         return self.operation(xx, scale, dim=-1, keepdim=False, agm=agm, distributed=distributed)                                         # [batch_size, time_dim, ...]
 
@@ -868,6 +883,40 @@ class Atom(Node):
 
     def time_depth(self) -> int:
         return 0
+
+
+class DistComparison(Atom):
+
+    def __init__(self, var: Var, landmark, threshold):
+        super().__init__()
+        self.var = var
+        self.landmark = landmark
+        self.threshold = threshold
+
+    def __str__(self):
+        pass
+
+    def _boolean(self):
+        pass
+
+    def _quantitative(self, env: dict, normalize: bool = False) -> Tensor:
+        pass
+
+    def _robustness_trace(self, env: dict, normalize=False, pscale=1.0, **kwargs):
+        traj = self.var.get_value(env)
+
+        # l2norm
+        distance = (traj - self.landmark).norm(dim=-1)
+
+        # quantitative robustness for comparison
+        z = (-distance + self.threshold)
+
+        if normalize:
+            z: Tensor = torch.tanh(z)
+
+        return z
+
+
 
 
 class Comparison(Atom):
@@ -911,18 +960,12 @@ class Comparison(Atom):
 
         return z
 
-    def _robustness_trace(self, trace, pscale=1.0, **kwargs):
+    def _robustness_trace(self, env: dict, pscale=1.0, **kwargs):
         '''
         Computing robustness trace.
         pscale scales the robustness by a constant. Default pscale=1.
         '''
-        if isinstance(trace, Expression):
-            trace = trace.value
-        if isinstance(self.val, Expression):
-            return (self.val.value - trace)*pscale
-        else:
-            return (self.val - trace)*pscale
-
+        return self._quantitative(env)
 
 def multiply_matrix_over_trajectory_batch(matrix, trajs):
     return torch.einsum("ij, bhj -> bhi", matrix, trajs)

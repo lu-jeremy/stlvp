@@ -23,50 +23,13 @@ from vint_train.data.data_utils import (
 # necessary for stl generation
 from stl_traj_pipeline import *
 from text_utils import *  # filter segmentation predictions
-from constants import *  # threshold values
-import stl   # fundamental stl expressions and operations
+import stl2vecl2
 
 
 """
 TODO:
 - see if tweaking the threshold does anything, look into normalization
 """
-
-
-class STL2VecL2:
-    def __init__(self):
-        self.out_vecs = []
-
-    def sample(self, num_wps: int):
-        pass
-
-    def create_stl_landmarks(self, waypoints: List) -> torch.Tensor:
-        """
-        Recursively generates an STL expression with the height of the parse tree being the length of the trajectory.
-        The expression is defined as the Euclidean similarity between the input trajectory and the dataset's waypoints
-        determined during the STL generation process.
-
-        Returns:
-            phi (`stlcg.Expression`):
-                The STL formula for the current trajectory run.
-        """
-
-        phi = None
-
-        for i in range(len(waypoints)):
-            # attach the right child to the left subtree, for every waypoint
-            distance = stl.Var(f"d_{i}")
-            visit_landmark = stl.Comparison(distance, SIM_THRESH[0])
-
-            if phi is None:
-                phi = visit_landmark
-            else:
-                phi = stl.Until(phi, visit_landmark)
-
-        # TODO: --------------------- stl2vec
-
-
-        return phi
 
 
 class ViNT_Dataset(Dataset):
@@ -181,11 +144,10 @@ class ViNT_Dataset(Dataset):
         else:
             self.num_action_params = 2
 
-        # generate STL before dataset, then sample during training
-        self.device = "cuda:0"
-        seg_model, _, _ = load_models(device=self.device)  # let's assume cuda for now
-        self.stl2vecl2 = STL2VecL2()
-        self.stls = self._generate_stl(self.data_folder, self.traj_names, seg_model)
+        # generate STL before dataset, then sample the cache during training
+        self.stl2vecl2 = stl2vecl2.STL2VecL2()
+        # maps each traj name to stl vector
+        self._generate_stl()
 
     def _process_trajectory_bag(self, trajectories: Dict) -> np.ndarray:
         """
@@ -228,9 +190,9 @@ class ViNT_Dataset(Dataset):
 
         return pos
 
-    def _generate_stl(self, data_folder: str, traj_runs: List, seg_model) -> Dict:
+    def _generate_stl(self):
         """
-        Saves STL expressions to .pt files.
+        Saves STL expressions to .pt files. Stores it in the stl_cache attribute.
 
         Args:
             dataset_name: the current dataset name.
@@ -238,72 +200,104 @@ class ViNT_Dataset(Dataset):
             seg_model: segmentation model for extracting landmarks.
         """
 
-        img_extension = ".jpg"
+        device = "cuda:0"
+        seg_model, _, _ = load_models(device=device)  # assume cuda for now
 
-        # DeepLabV3 preprocessing config
-        preprocess = transforms.Compose([
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        file_to_check = os.path.join(self.data_folder, self.traj_names[0], f"stl_{self.traj_names[0]}.pt")
 
-        tqdm_loader = enumerate(tqdm.tqdm(
-            traj_runs,
-            dynamic_ncols=True,
-            desc=f"Generating STL in {data_folder}...",
-        ))
+        if os.path.isfile(file_to_check):  # TODO: temp remove
+            os.remove(file_to_check)
 
-        # map each traj name to stl vector
-        stls_to_sample = {}
+        # if the first trajectory's stl file is not there, generate stl for all
+        if not os.path.isfile(file_to_check):
+            img_extension = ".jpg"
 
-        # for each run in the dataset
-        for i, traj_name in tqdm_loader:
-            curr_traj_path = os.path.join(data_folder, traj_name)
+            # DeepLabV3 preprocessing config
+            preprocess = transforms.Compose([
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
 
-            # store all the times (from img filenames)
-            times = [p[:p.find(img_extension)] for p in os.listdir(curr_traj_path) if p.endswith(img_extension)]
-            # load the images from the trajectory
-            images = torch.stack([preprocess(self._load_image(traj_name, t)) for t in times])
-            images = torch.as_tensor(images, dtype=torch.float32).to(self.device)
+            # data loader for storing stl
+            tqdm_loader = enumerate(tqdm.tqdm(
+                self.traj_names,
+                dynamic_ncols=True,
+                position=0,
+                leave=True,
+                desc=f"Generating STL in {self.data_folder}...",
+            ))
 
-            print(f"number of images/trajs: {len(images)}")
+            # for each run in the dataset
+            for i, traj_name in tqdm_loader:
+                # current trajetory for loading
+                trajectory_path = os.path.join(self.data_folder, traj_name)
+                # # for saving
+                # stl_file = os.path.join(trajectory_path, f"stl_{traj_name}.pt")
 
-            # process images first, store STL expressions
-            with torch.no_grad():
-                # TODO: check that hopefully there is no memory allocation issue here
-                outputs = seg_model(images)
+                # store all the times (from img filenames)
+                times = [p[:p.find(img_extension)] for p in os.listdir(trajectory_path) if p.endswith(img_extension)]
+                # load the images from the trajectory
+                images = torch.stack([preprocess(self._load_image(traj_name, t)) for t in times])
+                images = torch.as_tensor(images, dtype=torch.float32).to(device)
 
-            # retrieve position from trajectories
-            gt_trajs = self._get_trajectory(traj_name)
+                print(f"number of images/trajs: {len(images)}")
 
-            # pre-processed positions to filter
-            pos = self._process_trajectory_bag(gt_trajs)
+                # process images first, store STL expressions
+                with torch.no_grad():
+                    # TODO: check that hopefully there is no memory allocation issue here
+                    outputs = seg_model(images)
 
-            # preprocess the ground truth trajectories according to the dataset parameters
-            # f_curr, start, max_goal_dist = self.index_to_data[i]
-            # _, end, _ = self._sample_goal(f_curr, start, max_goal_dist)
-            # we do not need the goal position here
-            # gt_trajs, _ = self._compute_actions(gt_trajs, start, end)
+                # retrieve position from trajectories
+                gt_trajs = self._get_trajectory(traj_name)
 
-            # each run should have waypoints
-            _, waypoints, _ = filter_preds(outputs, pos)
-            # trajectory waypoint lengths are inhomogeneous
-            waypoints = [torch.from_numpy(w.mean(axis=0)) for w in waypoints]
+                # pre-processed positions to filter
+                pos = self._process_trajectory_bag(gt_trajs)
 
-            if len(waypoints) == 0: print(f"there are no landmarks in run {traj_name}")
-            # at this point, each waypoint should only have 1 path
-            print(waypoints[0].ndim)
-            assert waypoints[0].ndim == 1
+                # preprocess the ground truth trajectories according to the dataset parameters
+                # f_curr, start, max_goal_dist = self.index_to_data[i]
+                # _, end, _ = self._sample_goal(f_curr, start, max_goal_dist)
+                # we do not need the goal position here
+                # gt_trajs, _ = self._compute_actions(gt_trajs, start, end)
 
-            out = self.stl2vecl2.create_stl_landmarks(waypoints)
-            # each trajectory will correspond with the current stl expression
-            stls_to_sample[traj_name] = out
+                # each run should have waypoints
+                _, waypoints, _ = filter_preds(outputs, pos)
+                # trajectory waypoint lengths are inhomogeneous
+                waypoints = [torch.from_numpy(w.mean(axis=0)) for w in waypoints]
 
-            # write STl expressions to .pt file within same traj dir
-            # torch.save(trajs, os.path.join(curr_traj, f"wp_{traj_name}_.pt"))
-            # torch.save(phi, os.path.join(curr_traj, f"stl_{traj_name}.pt"))
+                if len(waypoints) == 0: print(f"there are no landmarks in run {traj_name}")
+                try:
+                    # waypoints should only have 1 path
+                    assert waypoints[0].ndim == 1
+                except:
+                    # if there aren't any waypoints, all positions are waypoints
+                    print(f"num waypoints: {len(waypoints)}; small dataset? length: {len(images)}")
+                    waypoints = pos
 
-        breakpoint()
+                # stl expression based on the number of waypoints
+                stl_out = self.stl2vecl2.create_stl_landmarks(waypoints)
 
-        return stls_to_sample
+                # each trajectory will correspond with the current stl expression
+                self.stl2vecl2.set_cache(traj_name, stl_out)
+
+                # don't store stl for now
+
+                # # write STl expressions to each trajectory
+                # if not os.path.isfile(stl_file):
+                #     torch.save(stl_out, stl_file)
+
+                # print(f"successfully saved stl!")
+                # print(self.stl2vecl2.get_cache())
+        else:
+            # load trajectories
+            for traj_name in tqdm.tqdm(self.traj_names):
+                # for loading
+                trajectory_path = os.path.join(self.data_folder, traj_name)
+                stl_file = os.path.join(trajectory_path, f"stl_{traj_name}.pt")
+
+                # load and store stl2vec
+                stl_in = torch.load(stl_file)
+                self.stl2vecl2.set_cache(traj_name, stl_in)
+
+        if len(self.stl2vecl2.get_cache()) != 0: print("stl dict is in memory!")
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -542,7 +536,7 @@ class ViNT_Dataset(Dataset):
 
         # sample stl from the dataset folders
         # we assume that f_curr is just 1 trajectory for now
-        stl_vec = self.stls_to_sample[f_curr]
+        stl_vec = self.stl2vecl2.get_cache()[f_curr]
 
         # run stl vector as well
         return (

@@ -6,15 +6,18 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import mlflow
+# import mlflow
 
 from sklearn.decomposition import PCA
 
-from wip_trajectory_generator.stl import expression as stl
+import stl
 
-from wip_trajectory_generator.stl2vec.measure import BaseMeasure
-from wip_trajectory_generator.stl2vec.kernel import STLKernel
-from wip_trajectory_generator.stl2vec.gram_matrix import GramMatrix
+import sys
+print(sys.path)
+
+from stl2vec.measure import BaseMeasure
+from stl2vec.kernel import STLKernel
+from stl2vec.gram_matrix import GramMatrix
 
 
 class STL2Vec(nn.Module):
@@ -60,15 +63,15 @@ class STL2Vec(nn.Module):
             self.gram = None
             self.pca = PCA(n_components=dimension)
             self.trained = False
-        else:
-            self._load_from_training_run(training_run_id)
-            self.trained = True
+        # else:
+        #     self._load_from_training_run(training_run_id)
+        #     self.trained = True
 
-    def _load_from_training_run(self, training_run_id):
-        logged_model_path = f'runs:/{training_run_id}/stl2vec'
-        model = mlflow.pytorch.load_model(logged_model_path)
-        self.gram = model.gram
-        self.pca = model.pca
+    # def _load_from_training_run(self, training_run_id):
+    #     logged_model_path = f'runs:/{training_run_id}/stl2vec'
+    #     model = mlflow.pytorch.load_model(logged_model_path)
+    #     self.gram = model.gram
+    #     self.pca = model.pca
 
     def run_training(
         self,
