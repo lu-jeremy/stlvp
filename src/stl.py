@@ -437,7 +437,8 @@ class Always(stlcg.TemporalOperator, Node):
         if self.operation is None:
             raise Exception()
         # keeping track of all values that share the min value so the gradients can be distributed equally.
-        if self.interval is None or (self.interval[1] == np.inf) & (self.interval[0] == 0):
+        # TODO: check whether setting this to 1 or np.inf works
+        if self.interval is None or (self.interval[1] == 1) & (self.interval[0] == 0):
             if distributed:
                 if x == h0:
                     new_h =  (h0 * c + x) / (c + 1)
@@ -660,18 +661,16 @@ class Until(Node):
 
         interval = self.interval
 
-        breakpoint()
-
         trace1 = self.left_child(env, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
         trace2 = self.right_child(env, pscale=pscale, scale=scale, keepdim=keepdim, agm=agm, distributed=distributed, **kwargs)
 
-        always = Always(subformula=stlcg.Identity(name=str(self.subformula1)))
+        always = Always(subformula=self.left_child)
 
         minish = stlcg.Minish()
         maxish = stlcg.Maxish()
 
         LHS = trace2.unsqueeze(-1).repeat([1, 1, 1,trace2.shape[1]]).permute(0, 3, 2, 1)
-        if interval == None or (self.interval[1] == np.inf) & (self.interval[0] == 0):
+        if interval == None or (self.interval[1] == 1) & (self.interval[0] == 0):
             # Case 1
             RHS = torch.ones_like(LHS)*-LARGE_NUMBER
             for i in range(trace2.shape[1]):
@@ -690,7 +689,7 @@ class Until(Node):
             for i in range(b, trace2.shape[1]):
                 A = trace2[:, i-b: i-a+1, :].unsqueeze(-1)
                 relevant = trace1[:,:i+1,:]
-                B = always(relevant.flip(1), scale=scale, keepdim=keepdim, distributed=distributed)[:,a:b+1,:].flip(1).unsqueeze(-1)
+                B = always._run_cell(relevant.flip(1), scale=scale, keepdim=keepdim, distributed=distributed)[:,a:b+1,:].flip(1).unsqueeze(-1)
                 RHS.append(maxish(minish(torch.cat([A,B], dim=-1), dim=-1, scale=scale, keepdim=False, distributed=distributed), dim=1, scale=scale, keepdim=keepdim, distributed=distributed))
             return torch.cat(RHS, dim=1)
         else:
@@ -699,9 +698,10 @@ class Until(Node):
             for i in range(a,trace2.shape[1]):
                 A = trace2[:,:i-a+1,:].unsqueeze(-1)
                 relevant = trace1[:,:i+1,:]
-                B = always(relevant.flip(1), scale=scale, keepdim=keepdim, distributed=distributed)[:,a:,:].flip(1).unsqueeze(-1)
+                B = always._run_cell(relevant.flip(1), scale=scale, keepdim=keepdim, distributed=distributed)[:,a:,:].flip(1).unsqueeze(-1)
                 RHS.append(maxish(minish(torch.cat([A,B], dim=-1), dim=-1, scale=scale, keepdim=False, distributed=distributed), dim=1, scale=scale, keepdim=keepdim, distributed=distributed))
             return torch.cat(RHS, dim=1)
+
 
 def eventually(x: Tensor, time_span: int) -> Tensor:
     """

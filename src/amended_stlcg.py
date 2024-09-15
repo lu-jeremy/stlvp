@@ -280,18 +280,17 @@ class DifferentiableSTL(torch.nn.Module, metaclass=ABCMeta):
 #         return Negation(phi)
 
 
-# class Identity(STL_Formula):
-
+# class Identity(DifferentiableSTL):
 #     def __init__(self, name='x'):
 #         super(Identity, self).__init__()
 #         self.name = name
-
-#     def robustness_trace(self, trace, pscale=1, **kwargs):
+#
+#     def _robustness_trace(self, trace, pscale=1, **kwargs):
 #         return trace * pscale
-
+#
 #     def _next_function(self):
 #         return []
-
+#
 #     def __str__(self):
 #         return "%s" %self.name
 
@@ -303,9 +302,6 @@ class TemporalOperator(DifferentiableSTL):
     interval: either None (defaults to [0, np.inf]), [a, b] ( b < np.inf), [a, np.inf] (a > 0)
     NOTE: Assume that the interval is describing the INDICES of the desired time interval. The user is responsible for converting the time interval (in time units) into indices (integers) using knowledge of the time step size.
     '''
-
-    # , subformula, interval=None
-
     def __init__(
             self,
             right_unbound: bool = False,
@@ -399,6 +395,7 @@ class TemporalOperator(DifferentiableSTL):
         return torch.cat(outputs, dim=1)                  # [batch_size, time_dim, ...]
 
 
+# (not actually implemented yet)
 # class Always(Temporal_Operator):
 #     def __init__(self, subformula, interval=None):
 #         super(Always, self).__init__(subformula=subformula, interval=interval)

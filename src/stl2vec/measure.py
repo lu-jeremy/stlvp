@@ -45,7 +45,7 @@ class BaseMeasure(Measure):
         self.device = device
         self.density = density
 
-        self.traj_length = 64
+        self.traj_length = 8
 
     def sample(self, samples=100000, varn=2):
         """

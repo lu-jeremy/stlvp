@@ -29,6 +29,13 @@ import stl2vecl2
 """
 TODO:
 - see if tweaking the threshold does anything, look into normalization
+- retrieve action stats dataset config variable
+- add attribute for size (optional)
+- we can change the measure size for our trajectory
+
+- q: why does stlcg just do a forward pass with always on the robustness trace for the first stl formula given the inputs, 
+while we just run the rnn cell on the trace directly? does this have to do with reversed signals?
+- 
 """
 
 
@@ -145,7 +152,7 @@ class ViNT_Dataset(Dataset):
             self.num_action_params = 2
 
         # generate STL before dataset, then sample the cache during training
-        self.stl2vecl2 = stl2vecl2.STL2VecL2()
+        self.stl2vecl2 = stl2vecl2.STL2VecL2(self.num_action_params, len_traj_pred)
         # maps each traj name to stl vector
         self._generate_stl()
 
@@ -261,12 +268,13 @@ class ViNT_Dataset(Dataset):
                 # each run should have waypoints
                 _, waypoints, _ = filter_preds(outputs, pos)
                 # trajectory waypoint lengths are inhomogeneous
+                # TODO: check that this should be (8,2) for each waypoints
                 waypoints = [torch.from_numpy(w.mean(axis=0)) for w in waypoints]
 
                 if len(waypoints) == 0: print(f"there are no landmarks in run {traj_name}")
                 try:
                     # waypoints should only have 1 path
-                    assert waypoints[0].ndim == 1
+                    assert waypoints[0].ndim == 2
                 except:
                     # if there aren't any waypoints, all positions are waypoints
                     print(f"num waypoints: {len(waypoints)}; small dataset? length: {len(images)}")
